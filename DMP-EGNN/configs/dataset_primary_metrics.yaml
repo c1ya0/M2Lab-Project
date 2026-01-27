@@ -1,0 +1,123 @@
+# Dataset-specific primary evaluation metrics
+# 
+# This configuration file defines the primary evaluation metric for each TDC dataset.
+# The primary metric is used for:
+# 1. Reporting and highlighting in evaluation results
+# 2. Model selection and comparison
+# 3. Standardized evaluation across different datasets
+#
+# Metric types:
+# - roc_auc: ROC-AUC (Area Under the ROC Curve) - for balanced classification datasets
+# - pr_auc: PR-AUC (Precision-Recall AUC) - for imbalanced classification datasets
+# - mae: Mean Absolute Error - for regression datasets
+# - spearman: Spearman Correlation Coefficient - for regression datasets with non-linear relationships
+
+dataset_primary_metrics:
+  # ============================================
+  # Classification Datasets - ROC-AUC
+  # ============================================
+  # Balanced or moderately imbalanced datasets
+  
+  ames:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  bbb_martins:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  bioavailability_ma:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  cyp3a4_substrate_carbonmangels:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  dili:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  herg:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  hia_hou:
+    primary_metric: roc_auc
+    metric_type: classification
+    
+  pgp_broccatelli:
+    primary_metric: roc_auc
+    metric_type: classification
+  
+  # ============================================
+  # Classification Datasets - PR-AUC
+  # ============================================
+  # Highly imbalanced classification datasets
+  
+  cyp2c9_substrate_carbonmangels:
+    primary_metric: pr_auc
+    metric_type: classification
+    
+  cyp2c9_veith:
+    primary_metric: pr_auc
+    metric_type: classification
+    
+  cyp2d6_substrate_carbonmangels:
+    primary_metric: pr_auc
+    metric_type: classification
+    
+  cyp2d6_veith:
+    primary_metric: pr_auc
+    metric_type: classification
+    
+  cyp3a4_veith:
+    primary_metric: pr_auc
+    metric_type: classification
+  
+  # ============================================
+  # Regression Datasets - MAE
+  # ============================================
+  # Standard regression datasets
+  
+  caco2_wang:
+    primary_metric: mae
+    metric_type: regression
+    
+  ld50_zhu:
+    primary_metric: mae
+    metric_type: regression
+    
+  lipophilicity_astrazeneca:
+    primary_metric: mae
+    metric_type: regression
+    
+  ppbr_az:
+    primary_metric: mae
+    metric_type: regression
+    
+  solubility_aqsoldb:
+    primary_metric: mae
+    metric_type: regression
+  
+  # ============================================
+  # Regression Datasets - Spearman
+  # ============================================
+  # Regression datasets with non-linear relationships
+  
+  clearance_hepatocyte_az:
+    primary_metric: spearman
+    metric_type: regression
+    
+  clearance_microsome_az:
+    primary_metric: spearman
+    metric_type: regression
+    
+  half_life_obach:
+    primary_metric: spearman
+    metric_type: regression
+    
+  vdss_lombardo:
+    primary_metric: spearman
+    metric_type: regression
+

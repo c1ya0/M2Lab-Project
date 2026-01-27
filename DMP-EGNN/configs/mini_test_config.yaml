@@ -1,0 +1,91 @@
+# AEGNN-M Small-scale Test Configuration File
+# Used for local quick testing, uses minimal parameters to exclude errors
+
+# Model configuration (minimal parameters)
+model:
+  type: "regressor"  # regressor or classifier
+  node_features: 78
+  edge_features: 4
+  hidden_dim: 32      # Minimal: originally 256
+  num_layers: 2       # Minimal: originally 6
+  num_heads: 2        # Minimal: originally 8
+  dropout: 0.1
+  output_dim: 1
+
+# Data configuration (minimal dataset)
+data:
+  train_path: "data/mini_test.csv"  # Only use 5 samples
+  val_path: null
+  test_path: null
+  target_column: "target"
+  smiles_column: "smiles"
+  batch_size: 2       # Minimal batch
+  num_workers: 0      # Do not use multiprocessing to avoid issues
+  max_samples: 5      # Use at most 5 samples
+
+# Graph construction configuration
+graph_builder:
+  use_atomic_number: true
+  use_hybridization: true
+  use_formal_charge: true
+  use_aromatic: true
+  use_chirality: true
+  use_hydrogen_bonds: true
+  use_bond_type: true
+  use_bond_stereo: true
+
+# Training configuration (minimal training)
+training:
+  num_epochs: 1       # Only train 1 epoch
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler_patience: 10
+  early_stopping_patience: 20
+  gradient_clip_norm: 1.0
+
+# Optimizer configuration
+optimizer:
+  type: "Adam"
+  lr: 0.001
+  weight_decay: 0.0001
+
+# Device configuration
+device:
+  type: "auto"  # auto, cuda, cpu
+  cuda_device: 0
+
+# Save configuration (do not save during testing)
+save:
+  checkpoint_dir: "checkpoints"
+  model_name: "mini_test"
+  save_best_only: false
+  save_frequency: 100  # Do not save
+
+# Logging configuration
+logging:
+  log_dir: "logs"
+  tensorboard: false  # Do not use tensorboard during testing
+  log_frequency: 1
+  verbose: true
+
+# Evaluation configuration
+evaluation:
+  metrics: ["mse", "mae"]
+  save_predictions: false
+  save_attention_weights: false
+  plot_results: false
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

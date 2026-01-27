@@ -1,0 +1,71 @@
+# AEGNN-M Dependency Requirements File
+# Deep Learning Framework
+torch>=1.12.0
+torch-geometric>=2.1.0
+torch-scatter>=2.0.9
+torch-sparse>=0.6.15
+torch-cluster>=1.6.0
+torch-spline-conv>=1.2.1
+
+# Scientific Computing
+numpy>=1.21.0
+scipy>=1.7.0
+pandas>=1.3.0
+
+# Machine Learning
+scikit-learn>=1.0.0
+
+# Molecular Processing
+rdkit>=2022.3.0
+rdkit-pypi>=2022.3.0
+deepchem>=2.7.0
+PyTDC>=0.4.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.0.0
+
+# Progress Bar and Logging
+tqdm>=4.62.0
+tensorboard>=2.8.0
+
+# Data Processing
+networkx>=2.6.0
+# pickle5>=0.0.11  # Python 3.8+ has built-in pickle protocol 5 support, no need to install
+
+# Configuration and Tools
+argparse
+json5>=0.9.0
+pyyaml>=6.0
+
+# Optional: Jupyter Support
+jupyter>=1.0.0
+ipykernel>=6.0.0
+ipywidgets>=7.6.0
+
+# Optional: GPU Acceleration
+# cupy-cuda11x>=10.0.0  # If using CUDA 11.x
+# cupy-cuda12x>=12.0.0  # If using CUDA 12.x
+
+# Optional: Distributed Training
+# torch-distributed>=1.12.0
+
+# Optional: Model Compression
+# torch-pruning>=1.0.0
+
+# Optional: Hyperparameter Optimization
+# optuna>=3.0.0
+# ray[tune]>=2.0.0
+
+# Optional: Model Interpretability
+# captum>=0.6.0
+# shap>=0.41.0
+
+# Optional: Data Augmentation
+# torch-augment>=0.1.0
+
+# Optional: Model Deployment
+# torchserve>=0.6.0
+# onnx>=1.12.0
+# onnxruntime>=1.12.0

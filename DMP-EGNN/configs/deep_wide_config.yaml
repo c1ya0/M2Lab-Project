@@ -1,0 +1,130 @@
+# AEGNN-M Deep and Wide Enhanced Configuration File
+# This configuration is used to create deeper and wider models, improving model capacity and expressive power
+
+# Model configuration - Enhanced version (deeper and wider)
+model:
+  type: "regressor"  # regressor or classifier
+  node_features: 78
+  edge_features: 4
+  
+  # ========== Model width parameters (wider) ==========
+  hidden_dim: 512        # Increase hidden dimension: 256 -> 512 (2x)
+  num_heads: 16          # Increase attention heads: 8 -> 16 (2x)
+  ffn_expansion_factor: 6  # Increase FFN expansion factor: 4 -> 6 (1.5x)
+  
+  # ========== Model depth parameters (deeper) ==========
+  num_layers: 10         # Increase layers: 6 -> 10 (approximately 1.67x)
+  
+  # ========== Normalization parameters ==========
+  dropout: 0.15          # Slightly increase dropout to prevent overfitting
+  
+  output_dim: 1  # 1 for regression, number of classes for classification
+
+# Data configuration
+data:
+  train_path: "data/train.csv"
+  val_path: "data/val.csv"
+  test_path: "data/test.csv"
+  target_column: "target"
+  smiles_column: "smiles"
+  batch_size: 16        # May need to reduce batch size to avoid memory issues due to larger model
+  num_workers: 4
+  max_samples: null  # null means use all data
+
+# Graph construction configuration
+graph_builder:
+  use_atomic_number: true
+  use_hybridization: true
+  use_formal_charge: true
+  use_aromatic: true
+  use_chirality: true
+  use_hydrogen_bonds: true
+  use_bond_type: true
+  use_bond_stereo: true
+
+# Training configuration
+training:
+  num_epochs: 150       # Deeper and wider models may need more epochs to converge
+  learning_rate: 5e-8    # May need to slightly reduce learning rate
+  weight_decay: 0.0001
+  scheduler_patience: 15
+  early_stopping_patience: 30
+  gradient_clip_norm: 1.0
+
+# Optimizer configuration
+optimizer:
+  type: "AdamW"  # Using AdamW may be better for large models
+  lr: 5e-8
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+# Learning rate scheduler configuration
+scheduler:
+  type: "ReduceLROnPlateau"
+  mode: "min"
+  factor: 0.5
+  patience: 15
+  min_lr: 1e-8
+
+# Device configuration
+device:
+  type: "auto"  # auto, cuda, cpu
+  cuda_device: 0
+
+# Save configuration
+save:
+  checkpoint_dir: "checkpoints"
+  model_name: "aegnn_m_deep_wide"
+  save_best_only: true
+  save_frequency: 10
+
+# Logging configuration
+logging:
+  log_dir: "logs"
+  tensorboard: true
+  log_frequency: 10
+  verbose: true
+
+# Evaluation configuration
+evaluation:
+  metrics: ["mse", "mae", "rmse", "r2", "correlation"]
+  save_predictions: true
+  save_attention_weights: true
+  plot_results: true
+
+# Data augmentation configuration (optional)
+augmentation:
+  enabled: false
+  rotation_prob: 0.5
+  noise_prob: 0.3
+  noise_std: 0.01
+
+# Normalization configuration
+normalization:
+  normalize_targets: true
+  normalize_features: true
+  method: "standard"
+
+# Cross-validation configuration (optional)
+cross_validation:
+  enabled: false
+  n_folds: 5
+  random_seed: 42
+
+# Hyperparameter search configuration (optional)
+hyperparameter_search:
+  enabled: false
+  method: "optuna"
+  n_trials: 100
+  search_space:
+    hidden_dim: [256, 512, 1024]
+    num_layers: [8, 10, 12]
+    num_heads: [8, 16, 32]
+    ffn_expansion_factor: [4, 6, 8]
+    dropout: [0.1, 0.15, 0.2]
+    learning_rate: [1e-8, 5e-8, 1e-7]
+
+
+
+

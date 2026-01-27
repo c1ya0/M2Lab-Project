@@ -1,0 +1,216 @@
+# AEGNN-M Optimized Configuration File
+# Based on Test 9 training results analysis
+
+# Model configuration
+model:
+  type: "classifier"  # Most datasets are classification tasks
+  node_features: 78
+  edge_features: 4
+  hidden_dim: 256
+  num_layers: 6
+  num_heads: 8
+  dropout: 0.3  # Increased from 0.1 to 0.3 to prevent overfitting
+  output_dim: 1
+
+# Data configuration
+data:
+  train_path: "data/train.csv"
+  val_path: "data/val.csv"
+  test_path: "data/test.csv"
+  target_column: "target"
+  smiles_column: "smiles"
+  batch_size: 32
+  num_workers: 4
+  max_samples: null
+
+# Graph construction configuration
+graph_builder:
+  use_atomic_number: true
+  use_hybridization: true
+  use_formal_charge: true
+  use_aromatic: true
+  use_chirality: true
+  use_hydrogen_bonds: true
+  use_bond_type: true
+  use_bond_stereo: true
+
+# Training configuration - Optimized
+training:
+  num_epochs: 250  # Increased training epochs
+  learning_rate: 1e-4  # Increased from 1e-7 to 1e-4 (1000x increase)
+  weight_decay: 0.001  # Increased from 0.0001 to 0.001
+  scheduler_patience: 15  # Increased from 10 to 15
+  early_stopping_patience: 30  # Increased from 20 to 30
+  gradient_clip_norm: 1.0
+
+# Optimizer configuration - Optimized
+optimizer:
+  type: "AdamW"  # Changed from Adam to AdamW (better weight decay)
+  lr: 1e-4  # Increased learning rate
+  weight_decay: 0.001  # Increased weight decay
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+# Learning rate scheduler configuration - Optimized
+scheduler:
+  type: "OneCycleLR"  # Use OneCycleLR instead of ReduceLROnPlateau
+  max_lr: 1e-3
+  pct_start: 0.1  # 10% for warmup
+  div_factor: 25.0
+  final_div_factor: 10000.0
+  # Alternative: CosineAnnealingWarmRestarts
+  # type: "CosineAnnealingWarmRestarts"
+  # T_0: 50
+  # T_mult: 2
+  # eta_min: 1e-6
+
+# Focal Loss configuration - New
+focal_loss:
+  enabled: true
+  # Configuration for different datasets (dynamically selected in training script)
+  default:
+    alpha: 0.25
+    gamma: 2.0
+  # Extremely imbalanced datasets (MUV)
+  imbalanced_severe:
+    alpha: 0.75
+    gamma: 3.0
+  # Moderately imbalanced datasets (HIV, TOX21)
+  imbalanced_moderate:
+    alpha: 0.5
+    gamma: 2.5
+  # Balanced datasets (CLINTOX, BBBP)
+  balanced:
+    alpha: 0.25
+    gamma: 2.0
+
+# Class weights configuration - New
+class_weights:
+  enabled: true
+  method: "balanced"  # 'balanced', 'custom', or 'none'
+  # If using 'custom', need to provide specific weights in training script
+
+# Threshold optimization - New
+threshold_optimization:
+  enabled: true
+  metric: "f1"  # Optimize F1 Score
+  # Or use 'youden' to maximize TPR - FPR
+
+# Device configuration
+device:
+  type: "auto"
+  cuda_device: 0
+
+# Save configuration
+save:
+  checkpoint_dir: "checkpoints"
+  model_name: "aegnn_m_optimized"
+  save_best_only: true
+  save_frequency: 10
+
+# Logging configuration
+logging:
+  log_dir: "logs"
+  tensorboard: true
+  log_frequency: 10
+  verbose: true
+
+# Evaluation configuration - Optimized
+evaluation:
+  metrics: ["accuracy", "precision", "recall", "f1", "auroc", "auprc"]
+  save_predictions: true
+  save_attention_weights: true
+  plot_results: true
+  optimize_threshold: true  # New: optimize classification threshold
+
+# Data augmentation configuration - Enabled
+augmentation:
+  enabled: true  # Changed from false to true
+  rotation_prob: 0.5
+  noise_prob: 0.3
+  noise_std: 0.01
+  # Can add more molecule graph-specific augmentation strategies
+
+# Normalization configuration
+normalization:
+  normalize_targets: true
+  normalize_features: true
+  method: "standard"
+
+# Dataset-specific configurations - New
+dataset_specific:
+  # Provide specific configuration for each dataset
+  MUV:
+    learning_rate: 1e-4
+    dropout: 0.5  # Stronger regularization
+    batch_size: 64
+    focal_alpha: 0.75
+    focal_gamma: 3.0
+    num_epochs: 300
+  
+  HIV:
+    learning_rate: 5e-5
+    dropout: 0.3
+    batch_size: 32
+    focal_alpha: 0.5
+    focal_gamma: 2.5
+    num_epochs: 250
+  
+  TOX21:
+    learning_rate: 1e-4
+    dropout: 0.4
+    batch_size: 32
+    focal_alpha: 0.5
+    focal_gamma: 2.5
+    num_epochs: 250
+  
+  SIDER:
+    learning_rate: 1e-4
+    dropout: 0.3
+    batch_size: 32
+    focal_alpha: 0.4
+    focal_gamma: 2.0
+    num_epochs: 200
+  
+  CLINTOX:
+    learning_rate: 1e-4
+    dropout: 0.2
+    batch_size: 32
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    num_epochs: 150
+  
+  BBBP:
+    learning_rate: 1e-4
+    dropout: 0.3
+    batch_size: 32
+    focal_alpha: 0.3
+    focal_gamma: 2.0
+    num_epochs: 200
+  
+  BACE:
+    learning_rate: 1e-4
+    dropout: 0.3
+    batch_size: 32
+    focal_alpha: 0.35
+    focal_gamma: 2.0
+    num_epochs: 200
+
+# Cross-validation configuration
+cross_validation:
+  enabled: false
+  n_folds: 5
+  random_seed: 42
+
+# Hyperparameter search configuration
+hyperparameter_search:
+  enabled: false
+  method: "optuna"
+  n_trials: 100
+  search_space:
+    hidden_dim: [128, 256, 512]
+    num_layers: [4, 6, 8]
+    num_heads: [4, 8, 16]
+    dropout: [0.2, 0.3, 0.4, 0.5]
+    learning_rate: [1e-5, 5e-5, 1e-4, 5e-4]
+

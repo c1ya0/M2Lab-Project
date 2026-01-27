@@ -1,0 +1,88 @@
+# Dataset-specific threshold configuration
+# 
+# Usage instructions:
+# 1. fixed_threshold: If set to a specific value (e.g., 0.1), directly use that threshold, skip automatic selection
+# 2. fixed_threshold: null - Use automatic selection mechanism
+# 3. method: "cv" or "adaptive" - Method for selecting threshold
+# 4. threshold_range: [min, max] - Threshold search range
+# 5. metric: Optimization metric ("f1", "pr_auc_f1_balanced", etc.)
+
+dataset_thresholds:
+  # ============================================
+  # Extremely imbalanced datasets (imbalance_ratio > 100)
+  # ============================================
+  
+  clintox:
+    # Option 1: Directly specify threshold (if confirmed most stable through multiple experiments)
+    fixed_threshold: null  # Example: 0.1 (uncomment and set value to use fixed threshold)
+    
+    # Option 2: Adjust automatic selection parameters (used when fixed_threshold is null)
+    method: "cv"  # Use cross-validation method (more robust, suitable for small datasets)
+    threshold_range: [0.05, 0.25]  # Search range
+    metric: "pr_auc_f1_balanced"  # Optimization metric: 60% PR-AUC + 40% F1
+    
+  muv:
+    fixed_threshold: null
+    method: "cv"
+    threshold_range: [0.05, 0.25]
+    metric: "pr_auc_f1_balanced"
+    
+  # ============================================
+  # Moderately imbalanced datasets (50 < imbalance_ratio <= 100)
+  # ============================================
+  
+  hiv:
+    fixed_threshold: null
+    method: "adaptive"  # Use adaptive method
+    threshold_range: [0.05, 0.5]  # Wider search range
+    metric: "pr_auc_f1_balanced"
+    
+  # ============================================
+  # Mildly imbalanced datasets (20 < imbalance_ratio <= 50)
+  # ============================================
+  
+  tox21:
+    fixed_threshold: null
+    method: "adaptive"
+    threshold_range: [0.05, 0.7]
+    metric: "pr_auc_f1_balanced"
+    
+  sider:
+    fixed_threshold: null
+    method: "adaptive"
+    threshold_range: [0.05, 0.7]
+    metric: "pr_auc_f1_balanced"
+    
+  # ============================================
+  # Balanced datasets (imbalance_ratio <= 20)
+  # ============================================
+  
+  bace:
+    fixed_threshold: null  # Use automatic selection (usually close to 0.5)
+    method: "adaptive"
+    threshold_range: [0.1, 0.9]  # Standard range
+    metric: "f1"  # Balanced datasets use F1 maximization
+    
+  bbbp:
+    fixed_threshold: null
+    method: "adaptive"
+    threshold_range: [0.1, 0.9]
+    metric: "f1"
+
+# ============================================
+# Usage Examples
+# ============================================
+#
+# Example 1: Set fixed threshold 0.1 for CLINTOX
+# clintox:
+#   fixed_threshold: 0.1
+#
+# Example 2: Adjust search range
+# clintox:
+#   fixed_threshold: null
+#   method: "cv"
+#   threshold_range: [0.08, 0.15]  # Narrower range
+#
+# Example 3: Use automatic selection (default behavior)
+# clintox:
+#   fixed_threshold: null  # Or don't set this configuration item

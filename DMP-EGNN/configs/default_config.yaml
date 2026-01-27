@@ -1,0 +1,117 @@
+# AEGNN-M Default Configuration File
+
+# Model configuration
+model:
+  type: "regressor"  # regressor or classifier
+  node_features: 78
+  edge_features: 4
+  hidden_dim: 256
+  num_layers: 6
+  num_heads: 8
+  dropout: 0.1
+  output_dim: 1  # 1 for regression, number of classes for classification
+
+# Data configuration
+data:
+  train_path: "data/train.csv"
+  val_path: "data/val.csv"
+  test_path: "data/test.csv"
+  target_column: "target"
+  smiles_column: "smiles"
+  batch_size: 32
+  num_workers: 4
+  max_samples: null  # null means use all data
+
+# Graph construction configuration
+graph_builder:
+  use_atomic_number: true
+  use_hybridization: true
+  use_formal_charge: true
+  use_aromatic: true
+  use_chirality: true
+  use_hydrogen_bonds: true
+  use_bond_type: true
+  use_bond_stereo: true
+
+# Training configuration
+training:
+  num_epochs: 100
+  learning_rate: 1e-7
+  weight_decay: 0.0001
+  scheduler_patience: 10
+  early_stopping_patience: 20
+  gradient_clip_norm: 1.0
+
+# Optimizer configuration
+optimizer:
+  type: "Adam"  # Adam, AdamW, SGD
+  lr: 1e-7
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+# Learning rate scheduler configuration
+scheduler:
+  type: "ReduceLROnPlateau"  # StepLR, CosineAnnealingLR, ReduceLROnPlateau
+  mode: "min"
+  factor: 0.5
+  patience: 10
+  min_lr: 1e-6
+
+# Device configuration
+device:
+  type: "auto"  # auto, cuda, cpu
+  cuda_device: 0
+
+# Save configuration
+save:
+  checkpoint_dir: "checkpoints"
+  model_name: "aegnn_m"
+  save_best_only: true
+  save_frequency: 10  # Save every N epochs
+
+# Logging configuration
+logging:
+  log_dir: "logs"
+  tensorboard: true
+  log_frequency: 10  # Log every N epochs
+  verbose: true
+
+# Evaluation configuration
+evaluation:
+  metrics: ["mse", "mae", "rmse", "r2", "correlation"]  # Regression metrics
+  # metrics: ["accuracy", "precision", "recall", "f1"]  # Classification metrics
+  save_predictions: true
+  save_attention_weights: true
+  plot_results: true
+
+# Data augmentation configuration (optional)
+augmentation:
+  enabled: false
+  rotation_prob: 0.5
+  noise_prob: 0.3
+  noise_std: 0.01
+
+# Normalization configuration
+normalization:
+  normalize_targets: true
+  normalize_features: true
+  method: "standard"  # standard, minmax, robust
+
+# Cross-validation configuration (optional)
+cross_validation:
+  enabled: false
+  n_folds: 5
+  random_seed: 42
+
+# Hyperparameter search configuration (optional)
+hyperparameter_search:
+  enabled: false
+  method: "optuna"  # optuna, grid, random
+  n_trials: 100
+  search_space:
+    hidden_dim: [128, 256, 512]
+    num_layers: [4, 6, 8]
+    num_heads: [4, 8, 16]
+    dropout: [0.1, 0.2, 0.3]
+    learning_rate: [0.0001, 0.001, 0.01]
