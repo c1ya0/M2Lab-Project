@@ -179,3 +179,9 @@ RDKit 的 `CalcMolDescriptors` 計算的約 217 個描述符包括：
 
 
 
+
+
+
+
+
+

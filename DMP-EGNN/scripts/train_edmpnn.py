@@ -1326,7 +1326,9 @@ class AEGNNDDPTrainer:
                         # For regression, predictions are already in the correct scale
                         if pred.dim() >= 2:
                             # If 2D, squeeze to 1D (regression typically has shape [batch_size, 1])
-                            all_predictions.append(pred.squeeze().cpu())
+                            # FIX: Use squeeze(dim=1) instead of squeeze() to avoid zero-dimensional tensor
+                            # when batch_size=1 (e.g., last batch of validation set)
+                            all_predictions.append(pred.squeeze(dim=1).cpu())
                         else:
                             # Already 1D, use directly
                             all_predictions.append(pred.cpu())
@@ -1340,7 +1342,9 @@ class AEGNNDDPTrainer:
                                 all_predictions.append(pred_probs)
                             elif pred.shape[1] == 1:
                                 # Binary classification with single output, apply sigmoid
-                                pred_probs = torch.sigmoid(pred.squeeze()).cpu()
+                                # FIX: Use squeeze(dim=1) instead of squeeze() to avoid zero-dimensional tensor
+                                # when batch_size=1 (e.g., last batch of validation set)
+                                pred_probs = torch.sigmoid(pred.squeeze(dim=1)).cpu()
                                 all_predictions.append(pred_probs)
                             else:
                                 # Edge case: shape[1] == 0 (should not happen, but handle gracefully)
@@ -1742,7 +1746,9 @@ class AEGNNDDPTrainer:
                     # Regression: use raw predictions directly (no sigmoid/softmax)
                     if pred.dim() >= 2:
                         # If 2D, squeeze to 1D (regression typically has shape [batch_size, 1])
-                        all_predictions.append(pred.squeeze().cpu())
+                        # FIX: Use squeeze(dim=1) instead of squeeze() to avoid zero-dimensional tensor
+                        # when batch_size=1 (e.g., last batch of test set)
+                        all_predictions.append(pred.squeeze(dim=1).cpu())
                     else:
                         # Already 1D, use directly
                         all_predictions.append(pred.cpu())
@@ -1753,7 +1759,9 @@ class AEGNNDDPTrainer:
                         pred_probs = torch.softmax(pred, dim=1)[:, 1].cpu()
                     else:
                         # Binary classification with single output, apply sigmoid
-                        pred_probs = torch.sigmoid(pred.squeeze()).cpu()
+                        # FIX: Use squeeze(dim=1) instead of squeeze() to avoid zero-dimensional tensor
+                        # when batch_size=1 (e.g., last batch of test set)
+                        pred_probs = torch.sigmoid(pred.squeeze(dim=1)).cpu()
                     all_predictions.append(pred_probs)
                 else:
                     # is_regression is None: fallback to old logic (will be determined later)
@@ -1763,7 +1771,9 @@ class AEGNNDDPTrainer:
                         pred_probs = torch.softmax(pred, dim=1)[:, 1].cpu()
                     else:
                         # Binary classification with single output, apply sigmoid
-                        pred_probs = torch.sigmoid(pred.squeeze()).cpu()
+                        # FIX: Use squeeze(dim=1) instead of squeeze() to avoid zero-dimensional tensor
+                        # when batch_size=1 (e.g., last batch of test set)
+                        pred_probs = torch.sigmoid(pred.squeeze(dim=1)).cpu()
                     all_predictions.append(pred_probs)
                 
                 all_targets.append(batch.y.cpu())
