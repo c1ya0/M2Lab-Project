@@ -502,12 +502,20 @@ def objective(trial: optuna.trial.Trial, args):
                             # Update reported_steps first to avoid duplicate reports in same loop iteration
                             reported_steps.add(current_epoch)
                             last_reported_epoch = current_epoch
-                            
-                            # Report average validation loss (use negative for maximize direction compatibility)
-                            # Note: For minimize direction (MAE), we report positive value
-                            # For maximize direction (ROC-AUC, Spearman), we report negative value
-                            # Since we're using validation loss here, we always report negative for pruning
-                            trial.report(-avg_val_loss, current_epoch)
+
+                            # Report intermediate value to Optuna for pruning.
+                            #
+                            # Regression (MAE) tasks use direction="minimize",所以要直接回報
+                            # 正的 validation loss，讓「loss 變小 ⇒ value 變小」，與 direction 一致。
+                            #
+                            # 其他任務（例如 classification / spearman）通常是 direction="maximize"，
+                            # 這時可以將 loss 取負號，讓「loss 變小 ⇒ -loss 變大」，與 maximize 一致。
+                            if task_type == "regression" and primary_metric == "mae":
+                                report_value = avg_val_loss          # minimize: use positive loss
+                            else:
+                                report_value = -avg_val_loss         # maximize-like: use negative loss
+
+                            trial.report(report_value, current_epoch)
                             
                             if trial.should_prune():
                                 # Terminate all training processes

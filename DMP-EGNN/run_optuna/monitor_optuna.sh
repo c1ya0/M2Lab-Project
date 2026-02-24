@@ -1464,7 +1464,7 @@ try:
         
         # === RECENT ACTIVITY ===
         if total_created_trials > 0:
-            recent = sorted(trials, key=lambda t: t.number, reverse=True)[:3]
+            recent = sorted(trials, key=lambda t: t.number, reverse=True)[:5]
             print("📝 Recent Activity:")
             for trial in recent:
                 # Determine color based on state

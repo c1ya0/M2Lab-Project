@@ -510,6 +510,15 @@ run_optimization() {
     echo "-------------------------------------------"
     echo "🚀 Launching MOD Optimization (Fusion Model Logic) for dataset: $current_dataset"
     STORAGE_URL="sqlite:///optuna_edmpnn_results/optuna_mod_new.db"
+    
+    # Avoid duplicate workers: if another optuna worker is already running for this dataset, do not start a second one
+    EXISTING_OPTUNA_PIDS=$(pgrep -f "optuna_serach_mod.py.*--dataset $current_dataset" 2>/dev/null || true)
+    if [ -n "$EXISTING_OPTUNA_PIDS" ]; then
+        echo "   ⚠️  Warning: Optuna worker(s) already running for dataset $current_dataset (PIDs: $EXISTING_OPTUNA_PIDS)"
+        echo "   Please stop them first (e.g. Ctrl+C in the terminal that started them, or: pkill -f 'optuna_serach_mod.py.*$current_dataset')"
+        echo "   Skipping to avoid duplicate workers and extra trials."
+        return 1
+    fi
     echo "   Storage: $STORAGE_URL"
     echo "   Logs: logs/optuna_launcher_mod_new/"
 
@@ -567,18 +576,22 @@ except Exception as e:
     
     echo "   📊 Existing trials: Total=$EXISTING_TOTAL, Completed=$EXISTING_COMPLETED, Failed=$EXISTING_FAILED, Running=$EXISTING_RUNNING"
     
-    # Calculate remaining trials needed
-    # Only count completed and failed trials (running trials will continue)
-    EXISTING_FINISHED=$((EXISTING_COMPLETED + EXISTING_FAILED))
-    REMAINING_TRIALS=$((TOTAL_TRIALS - EXISTING_FINISHED))
-    
-    if [ $REMAINING_TRIALS -le 0 ]; then
-        echo "   ✅ Target of $TOTAL_TRIALS trials already reached ($EXISTING_FINISHED finished trials: $EXISTING_COMPLETED completed + $EXISTING_FAILED failed)"
+    # Cap by TOTAL trial count: do not start more if we already have >= TOTAL_TRIALS trials
+    # (avoids overshooting after interrupt/zombie and avoids duplicate workers adding extra trials)
+    if [ "$EXISTING_TOTAL" -ge "$TOTAL_TRIALS" ]; then
+        echo "   ✅ Target of $TOTAL_TRIALS trials already reached (total trials: $EXISTING_TOTAL)"
         echo "   Skipping optimization (no new trials needed)"
         return 2  # Return 2 indicates skip (no cooldown needed)
     fi
     
-    echo "   🎯 Remaining trials needed: $REMAINING_TRIALS (target: $TOTAL_TRIALS, existing: $EXISTING_TOTAL)"
+    # Remaining = how many more trials to create so total does not exceed TOTAL_TRIALS
+    REMAINING_TRIALS=$((TOTAL_TRIALS - EXISTING_TOTAL))
+    if [ $REMAINING_TRIALS -le 0 ]; then
+        echo "   ✅ No new trials needed (total $EXISTING_TOTAL >= target $TOTAL_TRIALS)"
+        return 2
+    fi
+    
+    echo "   🎯 Remaining trials to run: $REMAINING_TRIALS (target total: $TOTAL_TRIALS, existing total: $EXISTING_TOTAL)"
     
     # Sequential mode: single worker handles all remaining trials
     # Each trial will execute sequentially, but seeds within each trial run in parallel
