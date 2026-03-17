@@ -1,0 +1,8 @@
+optuna==4.3.0
+torch-geometric==2.6.1
+plotly==6.0.1
+PyTDC==0.4.1
+deepchem==2.8.0
+descriptastorus==2.8.0
+chemprop==1.7.1
+pydantic==1.10.13
