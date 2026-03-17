@@ -1,0 +1,9 @@
+data/
+results/
+chart.ipynb
+check_data.ipynb
+mmb5.txt
+
+
+__pycache__/
+*.pyc
