@@ -140,7 +140,7 @@ def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_mo
 
     if model_type == 'DMPEGNN':
         return DMPEGNN_Fusion_Model(
-            node_features=78,
+            node_features=82,
             edge_features=9,
             descriptor_dim=200,
             output_dim=task_output_dims[0],
@@ -156,7 +156,7 @@ def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_mo
     if model_type == 'DMPEGNN_MMB_DESC':
         # Use DMPEGNN as graph encoder (no descriptor inside backbone), then fuse with MMB + DESC in MLP.
         dmpegnn_backbone = DMPEGNN(
-            node_features=78,
+            node_features=82,
             edge_features=9,
             hidden_dim=args.dmpegnn_hidden_dim,
             num_layers=args.dmpegnn_num_layers,
@@ -174,7 +174,6 @@ def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_mo
             dmpegnn_backbone=dmpegnn_backbone,
             mmb_model=megamolbart_model,
             task_output_dims=task_output_dims,
-            dmpegnn_graph_dim=args.dmpegnn_hidden_dim,
             **mlp_kwargs,
         )
     
@@ -216,7 +215,7 @@ def sample_dmpegnn_params(trial):
         'dmpegnn_num_layers': trial.suggest_int('dmpegnn_num_layers', 2, 6),
         'dmpegnn_num_heads': trial.suggest_categorical('dmpegnn_num_heads', [4, 8]),
         'dmpegnn_dropout': trial.suggest_float('dmpegnn_dropout', 0.0, 0.3, step=0.05),
-        'dmpegnn_dmp_steps': trial.suggest_int('dmpegnn_dmp_steps', 1, 3),
+        'dmpegnn_dmp_steps': trial.suggest_int('dmpegnn_dmp_steps', 1, 4),
         'dmpegnn_pool_type': trial.suggest_categorical('dmpegnn_pool_type', ['mean', 'sum']),
     }
 

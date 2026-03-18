@@ -9,7 +9,7 @@ from tdc.benchmark_group import admet_group
 from sklearn.model_selection import KFold
 import pandas as pd
 
-from core.dempegnn_data_utils import MolecularGraphBuilder
+from core.dmpegnn_data_utils import MolecularGraphBuilder
 
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -130,7 +130,8 @@ def model_forward(model, data, model_type):
             edge_attr = torch.zeros(n_edges, 9, device=data.x.device, dtype=data.x.dtype)
         pos = getattr(data, 'pos', None)
         descriptor = data.descriptor if hasattr(data, 'descriptor') and data.descriptor is not None else torch.zeros(data.num_graphs if hasattr(data, 'num_graphs') else data.batch.max().item() + 1, 200, device=data.x.device, dtype=data.x.dtype)
-        return model(data.x, data.edge_index, edge_attr, data.batch, descriptor, pos=pos, task_index=0)
+        molecule_idx = getattr(data, 'molecule_idx', None)
+        return model(data.x, data.edge_index, edge_attr, data.batch, descriptor, pos=pos, task_index=0, molecule_idx=molecule_idx)
     elif model_type == 'DMPEGNN_MMB_DESC':
         edge_attr = getattr(data, 'edge_attr', None)
         if edge_attr is None:

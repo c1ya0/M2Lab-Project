@@ -566,7 +566,11 @@ class MPN_MMB_Model(nn.Module):
 
 
 # =================== DMPEGNN Fusion Wrapper ===================
-# Uses local core/edmpnn_model_new.py (AEGNNM). Fusion data: x 78-dim, edge_attr 9-dim, descriptor 200.
+# Uses local core/edmpnn_model_new.py (AEGNNM).
+# Fusion data (OGB-style extended):
+#   - x: 82-dim node features (48 atom type + 11 degree + 11 charge + 5 hybrid + 1 aromatic + 6 num_H)
+#   - edge_attr: 9-dim edge features
+#   - descriptor: 200-dim RDKit descriptors
 # Wrapper returns only logits for compatibility with Fusion train_utils / loss.
 
 class DMPEGNN_Fusion_Model(nn.Module):
@@ -574,7 +578,7 @@ class DMPEGNN_Fusion_Model(nn.Module):
 
     def __init__(
         self,
-        node_features: int = 78,
+        node_features: int = 82,
         edge_features: int = 9,
         descriptor_dim: int = 200,
         output_dim: int = 1,
@@ -606,9 +610,10 @@ class DMPEGNN_Fusion_Model(nn.Module):
             pool_type=pool_type,
             use_equivariant=True,
             use_fingerprint=False,
-            use_descriptor=use_descriptor,
+            use_descriptor=False,
             descriptor_dim=descriptor_dim,
             dmp_steps=dmp_steps,
+            use_coord_branch=False,
             **kwargs
         )
         # When task_output_dims is provided, enable multi-task heads (similar to other fusion models).
@@ -638,6 +643,7 @@ class DMPEGNN_Fusion_Model(nn.Module):
         descriptor: torch.Tensor,
         pos: torch.Tensor,
         task_index: int = 0,
+        molecule_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # When backbone is equivariant, require valid 3D coordinates.
         if getattr(self.backbone, "use_equivariant", False):
@@ -651,18 +657,24 @@ class DMPEGNN_Fusion_Model(nn.Module):
         if self.task_output_dims is None:
             logits, _ = self.backbone(
                 x, edge_index, edge_attr, batch=batch,
-                pos=pos, fingerprint=None, descriptor=descriptor, b2revb=None
+                pos=pos, fingerprint=None, descriptor=None, b2revb=None
             )
+            # Multi-conformer aggregation: average conformer logits per molecule.
+            if molecule_idx is not None and molecule_idx.numel() == logits.size(0):
+                logits = global_mean_pool(logits, molecule_idx)
             return logits
 
         # Multi-task path (Route B): use DMPEGNN graph_features + SharedMLP + task-specific head.
         # Defensive unpacking: backbone return shape may change (2-tuple vs 3-tuple); we only rely on graph_features.
         result = self.backbone(
             x, edge_index, edge_attr, batch=batch,
-            pos=pos, fingerprint=None, descriptor=descriptor,
+            pos=pos, fingerprint=None, descriptor=None,
             return_graph_features=True, b2revb=None, compute_logits=False,
         )
         graph_features = result[-1]
+        # Multi-conformer aggregation: average conformer graph_features per molecule before MLP.
+        if molecule_idx is not None and molecule_idx.numel() == graph_features.size(0):
+            graph_features = global_mean_pool(graph_features, molecule_idx)
         shared_features = self.shared_mlp(graph_features.float())
         return self.task_heads[task_index](shared_features)
 
@@ -675,7 +687,6 @@ class DMPEGNN_MMB_Desc_Model(nn.Module):
         dmpegnn_backbone: nn.Module,
         mmb_model: nn.Module,
         task_output_dims: List[int],
-        dmpegnn_graph_dim: int,
         mlp_hidden_dim: int = 128,
         mlp_num_layers: int = 3,
         mlp_activation: str = "relu",
@@ -686,9 +697,11 @@ class DMPEGNN_MMB_Desc_Model(nn.Module):
         self.dmpegnn_backbone = dmpegnn_backbone
         self.mmb_model = mmb_model
 
-        # In Route B, descriptors are consumed inside dmpegnn_backbone (use_descriptor=True),
-        # so fusion MLP only sees dmpegnn graph features + MMB embeddings (no extra DESC_DIM here).
-        combined_dim = int(dmpegnn_graph_dim) + int(MMB_OUTPUT_DIM)
+        # Automatically derive graph feature dimension from backbone to avoid manual mismatch.
+        # backbone.graph_repr_dim accounts for all enabled branches (H, coord, fingerprint, descriptor).
+        # Route A: descriptors are fused at MLP level (not inside backbone), so DESC_DIM is added here.
+        graph_dim = int(dmpegnn_backbone.graph_repr_dim)
+        combined_dim = graph_dim + int(MMB_OUTPUT_DIM) + int(DESC_DIM)
         self.shared_mlp = SharedMLP(
             input_dim=combined_dim,
             hidden_dim=mlp_hidden_dim,
@@ -745,6 +758,8 @@ class DMPEGNN_MMB_Desc_Model(nn.Module):
                 graph_features = global_mean_pool(graph_features, molecule_idx)
         mmb_embeddings = self.mmb_model(smiles)  # (batch, 256)
 
-        combined = torch.cat([graph_features.float(), mmb_embeddings.float()], dim=1)
+        # Route A: descriptors fused at MLP level alongside graph features and MMB embeddings.
+        desc = descriptors.contiguous().view(-1, DESC_DIM).float()
+        combined = torch.cat([graph_features.float(), mmb_embeddings.float(), desc], dim=1)
         shared_features = self.shared_mlp(combined)
         return self.task_heads[task_index](shared_features)

@@ -315,7 +315,7 @@ class GATEGNNLayer(MessagePassing):
             e = e + e_edge
         
         
-        alpha = softmax(e, edge_index[0], num_nodes=h.size(0))
+        alpha = softmax(e, edge_index[1], num_nodes=h.size(0))
         
         return alpha
     
@@ -324,19 +324,21 @@ class GATEGNNLayer(MessagePassing):
         device = h.device
         num_nodes = h.size(0)
         
-        pos_i = pos[edge_index[0]]  # [E, 3]
-        pos_j = pos[edge_index[1]]  # [E, 3]
+        # For consistency with standard GAT semantics and PyG's MessagePassing,
+        # we treat edge_index[1] as the "target" / receiving node i, and
+        # edge_index[0] as the "source" / sending node j.
+        # All EGNN-style updates (coordinates and node features) therefore
+        # aggregate to edge_index[1] (target nodes).
+        pos_i = pos[edge_index[1]]  # target node positions [E, 3]
+        pos_j = pos[edge_index[0]]  # source node positions [E, 3]
         rel_pos = pos_i - pos_j
         dist_sq = (rel_pos ** 2).sum(dim=-1, keepdim=True)
         
-        # Check for abnormally small distances (numerical stability)
-        # If two nodes have identical positions, dist_sq will be 0, which may cause issues
-        if (dist_sq < 1e-10).any():
-            # Clamp to minimum value to prevent numerical instability
-            dist_sq = torch.clamp(dist_sq, min=1e-8)
+        # Clamp to minimum value to prevent numerical instability when two nodes overlap
+        dist_sq = dist_sq.clamp(min=1e-8)
         
-        hi = h[edge_index[0]]
-        hj = h[edge_index[1]]
+        hi = h[edge_index[1]]  # features of target nodes i
+        hj = h[edge_index[0]]  # features of source nodes j
         
         inputs = [hi, hj, dist_sq]
         if edge_attr is not None and self.edge_attr_proj is not None:
@@ -348,12 +350,12 @@ class GATEGNNLayer(MessagePassing):
         if self.dmp_steps > 0:
             e_ij = self._run_directed_mp(e_ij, edge_index, num_nodes, b2revb=b2revb)
         
-        # Coordinate update with normalization constant C = 1/deg(i)
+        # Coordinate update with normalization constant C = 1/deg(i), where i = target = edge_index[1]
         deg = torch.zeros(num_nodes, device=device).scatter_add_(
-            0, edge_index[0], torch.ones(edge_index.size(1), device=device)
+            0, edge_index[1], torch.ones(edge_index.size(1), device=device)
         )
         deg = deg.clamp(min=1.0)
-        coord_coeff = (1.0 / deg)[edge_index[0]].unsqueeze(-1)
+        coord_coeff = (1.0 / deg)[edge_index[1]].unsqueeze(-1)
         phi_x_val = torch.tanh(self.phi_x(e_ij))  # [E, 1], bounded for stability
         coord_contrib = coord_coeff * rel_pos * phi_x_val
         
@@ -363,12 +365,13 @@ class GATEGNNLayer(MessagePassing):
         coord_contrib = coord_contrib.to(pos.dtype)
         
         pos_update = torch.zeros_like(pos, dtype=pos.dtype)
-        pos_update.index_add_(0, edge_index[0], coord_contrib)
+        # Aggregate coordinate contributions to target nodes (edge_index[1])
+        pos_update.index_add_(0, edge_index[1], coord_contrib)
         pos = pos + pos_update
         
-        # Aggregate node messages m_i = Σ_j e_ij^T
+        # Aggregate node messages m_i = Σ_j e_ij, to target nodes i = edge_index[1]
         node_messages = torch.zeros(num_nodes, h.size(-1), device=device, dtype=h.dtype)
-        node_messages.index_add_(0, edge_index[0], e_ij.to(h.dtype))
+        node_messages.index_add_(0, edge_index[1], e_ij.to(h.dtype))
         
         h = self.phi_h(torch.cat([h, node_messages], dim=-1))
         return h, pos
@@ -480,7 +483,9 @@ class GATEGNNLayer(MessagePassing):
             num_nodes: Number of nodes in the graph
             b2revb: [E] tensor, b2revb[i] gives the index of the reverse edge of edge i (optional, will be built if None)
         """
-        e = e_ij  # edge features e_ij: from source (edge_index[0]) to target (edge_index[1])
+        # Chemprop-style initial residual connection: keep a copy of initial edge features.
+        e_init = e_ij  # initial edge features
+        e = e_ij       # working edge features for iterative updates
         device = e.device
         
         # Build reverse edge mapping if not provided
@@ -507,9 +512,8 @@ class GATEGNNLayer(MessagePassing):
         
         for step in range(self.dmp_steps):
             # Aggregate all incoming edges to each node (edges where target = node)
-            # For DMPNN: e_{ij}^{t+1} = MLP(e_{ij}^t, Σ_{k∈N(i)\{j}} e_{ki}^t)
-            # For edge e_{ij} (from i to j), we need to aggregate all edges pointing to source node i
-            # All edges pointing to i have target = i, i.e., edge_index[1] == i
+            # For DMPNN: e_{ij}^{t+1} = e_init + MLP(e_init, Σ_{k∈N(i)\{j}} e_{ki}^t)
+            # Message aggregation still uses the evolving e (from previous step)
             incoming_sum = torch.zeros(num_nodes, e.size(-1), device=device, dtype=e.dtype)
             incoming_sum.index_add_(0, edge_index[1], e)  # Aggregate to target nodes (all edges pointing to each node)
             
@@ -518,8 +522,12 @@ class GATEGNNLayer(MessagePassing):
             # - We need to exclude the reverse edge e_{ji} (from j to i), which also points to i
             # - The reverse edge e_{ji} is at index b2revb[edge_idx] for edge e_{ij}
             neighbor_sum = incoming_sum[edge_index[0]] - e[b2revb]  # Exclude reverse edge e_{ji}
-            update_input = torch.cat([e, neighbor_sum], dim=-1)
-            e = self.mlp_edge_update(update_input)
+            # Chemprop-style: use e_init (not evolving e) as the base for MLP input,
+            # and anchor the output back to e_init every step.
+            # Formula: e^t = e_init + MLP(e_init, message^t)
+            update_input = torch.cat([e_init, neighbor_sum], dim=-1)
+            delta = self.mlp_edge_update(update_input)
+            e = e_init + delta
         return e
     
     def message(self, x_j, alpha, edge_attr=None):
@@ -661,47 +669,7 @@ class AEGNNLayer(nn.Module):
         else:
             self.residual_proj = None
         
-        # Position encoding (for equivariance) with gating mechanism (Solution 2, Option B)
-        if use_equivariant:
-            # Project coordinates to input dimension to avoid shape inconsistency when adding to output dimension
-            self.pos_embedding = nn.Linear(3, in_channels)
-            
-            # Gating mechanism (Option B: Per-dimension gating) - Solution 2 from PROBLEM_ANALYSIS.md
-            # Each feature dimension has an independent gate value for adaptive fusion
-            self.pos_gate = nn.Sequential(
-                nn.Linear(in_channels * 2, in_channels // 2),
-                nn.SiLU(),
-                nn.Dropout(dropout * 0.5),  # Smaller dropout for gate network
-                nn.Linear(in_channels // 2, in_channels),
-                nn.Sigmoid()  # Output [N, in_channels] gate values in [0, 1]
-            )
-            
-            # Initialize gate network: start with conservative fusion (small initial gate values)
-            self._init_pos_gate()
-    
-    def _init_pos_gate(self):
-        """
-        Initialize position gate network with conservative values.
-        This ensures initial gate values are small (~0.12), allowing the model
-        to start with conservative fusion and learn optimal fusion strategy during training.
-        """
-        def init_gate_weights(m):
-            if isinstance(m, nn.Linear):
-                # Find the last linear layer (before Sigmoid)
-                if m == self.pos_gate[-2]:  # Second to last layer (last is Sigmoid)
-                    # Small weights for conservative initial gate values
-                    nn.init.normal_(m.weight, mean=0, std=0.01)
-                    # Negative bias: Sigmoid(-2) ≈ 0.12, small initial gate value
-                    nn.init.constant_(m.bias, -2.0)
-                else:
-                    # Standard initialization for other layers
-                    nn.init.xavier_uniform_(m.weight)
-                    nn.init.zeros_(m.bias)
-        
-        self.pos_gate.apply(init_gate_weights)
-        
-    def forward(self, x, edge_index, edge_attr=None, pos=None, b2revb=None, 
-                layer_idx=None, pos_scale_per_layer=None):
+    def forward(self, x, edge_index, edge_attr=None, pos=None, b2revb=None):
         """
         Forward propagation
         Args:
@@ -710,35 +678,7 @@ class AEGNNLayer(nn.Module):
             edge_attr: Edge features
             pos: Node positions (optional, for equivariance)
             b2revb: Pre-computed reverse edge mapping [E] (optional, Chemprop style)
-            layer_idx: Layer index for layer-wise scaling (Recommendation C)
-            pos_scale_per_layer: Per-layer scaling factors for positional encoding (Recommendation C)
         """
-        # Position encoding (if position information is provided)
-        # Check if pos contains valid (non-zero) coordinates to avoid encoding zero positions
-        if pos is not None and self.use_equivariant:
-            # Use stricter validation to ensure meaningful position information
-            # This checks: (1) all values are finite, (2) sufficient nodes have non-zero positions,
-            # and (3) mean position norm is above threshold
-            # This prevents encoding zero positions which would cause identical encodings
-            has_valid_pos = check_valid_positions(pos)
-            
-            if has_valid_pos:
-                pos_encoded = self.pos_embedding(pos)
-                # Gating mechanism: learn adaptive fusion weights per dimension
-                gate_input = torch.cat([x, pos_encoded], dim=-1)  # [N, 2*in_channels]
-                gate = self.pos_gate(gate_input)  # [N, in_channels]
-                
-                # Recommendation C: Layer-wise scaling for positional encoding
-                # Apply per-layer scaling factor if provided
-                if pos_scale_per_layer is not None and layer_idx is not None:
-                    layer_scale = pos_scale_per_layer[layer_idx]  # Get scaling factor for this layer
-                    # Adaptive fusion with layer-wise scaling: x = x + layer_scale * gate * pos_encoded
-                    x = x + layer_scale * gate * pos_encoded
-                else:
-                    # Fallback: use gating mechanism without layer-wise scaling
-                    x = x + gate * pos_encoded
-            # If pos is invalid, skip position encoding to avoid identical encodings
-        
         # Save input for residual connection (needs to be projected to output dimension)
         x_residual = x
         
@@ -746,7 +686,9 @@ class AEGNNLayer(nn.Module):
         if self.pre_norm:
             # Pre-Norm: Norm -> Attention -> Add
             x_norm = self.norm1(x)
-            gat_out, attn_weights, updated_pos = self.gat_egnn(x_norm, edge_index, edge_attr, pos, b2revb=b2revb)
+            gat_out, attn_weights, updated_pos = self.gat_egnn(
+                x_norm, edge_index, edge_attr, pos, b2revb=b2revb
+            )
             
             # If input and output dimensions differ, need to project residual connection
             if self.residual_proj is not None:
@@ -763,7 +705,9 @@ class AEGNNLayer(nn.Module):
             
         else:
             # Post-Norm (Original): Attention -> Add -> Norm
-            gat_out, attn_weights, updated_pos = self.gat_egnn(x, edge_index, edge_attr, pos, b2revb=b2revb)
+            gat_out, attn_weights, updated_pos = self.gat_egnn(
+                x, edge_index, edge_attr, pos, b2revb=b2revb
+            )
             
             # If input and output dimensions differ, need to project residual connection
             if self.residual_proj is not None:
@@ -809,7 +753,8 @@ class AEGNNM(nn.Module):
                  use_descriptor=True,
                  descriptor_dim=217,
                  descriptor_dropout=0.0,
-                 activation='SiLU'):
+                 activation='SiLU',
+                 use_coord_branch=False):
         super(AEGNNM, self).__init__()
         
         self.num_layers = num_layers
@@ -824,6 +769,7 @@ class AEGNNM(nn.Module):
         self.use_descriptor = use_descriptor
         self.descriptor_dim = descriptor_dim
         self.descriptor_dropout = descriptor_dropout
+        self.use_coord_branch = use_coord_branch
         
         # Input projection layers
         self.node_embedding = nn.Linear(node_features, hidden_dim)
@@ -846,7 +792,7 @@ class AEGNNM(nn.Module):
             if use_fingerprint_gate:
                 # Gating Mechanism: Use GNN features (hidden_dim) to gate Fingerprint features (hidden_dim // 2)
                 self.fingerprint_gate_mlp = nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim // 2),
+                    nn.Linear(hidden_dim // 2, hidden_dim // 2),
                     nn.SiLU(),
                     nn.Linear(hidden_dim // 2, hidden_dim // 2),
                     nn.Sigmoid()
@@ -888,17 +834,6 @@ class AEGNNM(nn.Module):
             for i in range(num_layers)
         ])
         
-        # Recommendation C: Layer-wise scaling for positional encoding
-        # Different layers use different scaling factors
-        # Shallow layers: positional information is more important (fusion just begins)
-        # Deep layers: positional information is relatively less important (already fused)
-        if use_equivariant:
-            self.pos_scale_per_layer = nn.Parameter(
-                torch.ones(num_layers) * 0.1  # Initial value: 0.1 for conservative fusion
-            )
-        else:
-            self.pos_scale_per_layer = None
-        
         # Modality-specific MLPs for balanced fusion (optimization suggestion 1)
         # Process 2D mean H and 3D mean X separately through small MLPs before concat, to avoid single modality dominance
         self.h_mlp = nn.Sequential(
@@ -907,15 +842,18 @@ class AEGNNM(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, hidden_dim // 2)
         )
-        self.x_mlp = nn.Sequential(
-            nn.Linear(coord_dim, hidden_dim // 2),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, hidden_dim // 2)
-        )
+        if use_coord_branch:
+            self.x_mlp = nn.Sequential(
+                nn.Linear(coord_dim, hidden_dim // 2),
+                nn.SiLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, hidden_dim // 2)
+            )
         
-        # Output layer (cat of processed H and X)
-        self.graph_repr_dim = hidden_dim  # Default: hidden/2 (H) + hidden/2 (X)
+        # Base representation dimension: starts from H branch
+        self.graph_repr_dim = hidden_dim // 2  # hidden/2 (H branch)
+        if use_coord_branch:
+            self.graph_repr_dim += hidden_dim // 2  # Add coord (X) branch dimension
         if use_fingerprint:
             self.graph_repr_dim += hidden_dim // 2  # Add fingerprint dimension
         if use_descriptor:
@@ -950,10 +888,8 @@ class AEGNNM(nn.Module):
         attention_weights = []
         
         # Pass through GAT-EGNN layers
-        for layer_idx, layer in enumerate(self.aegnn_layers):
-            # Pass layer index for layer-wise scaling (Recommendation C)
-            x, attn_weights, updated_pos = layer(x, edge_index, edge_attr, pos, b2revb=b2revb, 
-                                                 layer_idx=layer_idx, pos_scale_per_layer=self.pos_scale_per_layer)
+        for layer in self.aegnn_layers:
+            x, attn_weights, updated_pos = layer(x, edge_index, edge_attr, pos, b2revb=b2revb)
             
             # Only update position if the updated position is valid (maintains continuity of position updates)
             # GATEGNNLayer already validates positions before returning, so updated_pos is valid if not None
@@ -980,28 +916,29 @@ class AEGNNM(nn.Module):
         else:
             node_mean = global_mean_pool(x, batch)  # Default to mean
         
-        # Per-graph pooling for coordinates (X) - use same aggregation method
-        if pos is not None:
-            if self.pool_type == 'mean':
-                coord_mean = global_mean_pool(pos, batch)  # [batch_size, coord_dim]
-            elif self.pool_type == 'sum':
-                coord_mean = global_add_pool(pos, batch)  # [batch_size, coord_dim]
-            elif self.pool_type == 'norm':
-                coord_sum = global_add_pool(pos, batch)  # [batch_size, coord_dim]
-                num_nodes_per_graph = global_add_pool(torch.ones(pos.size(0), 1, device=pos.device), batch)  # [batch_size, 1]
-                coord_mean = coord_sum / (torch.sqrt(num_nodes_per_graph) + 1e-8)  # [batch_size, coord_dim]
+        # Per-graph pooling for coordinates (X)
+        # Disabled by default (use_coord_branch=False) to avoid absolute coordinate leakage.
+        # Enable via use_coord_branch=True for ablation studies.
+        h_processed = self.h_mlp(node_mean)         # [batch_size, hidden_dim // 2]
+        feature_list = [h_processed]
+
+        if self.use_coord_branch:
+            if pos is not None:
+                if self.pool_type == 'mean':
+                    coord_mean = global_mean_pool(pos, batch)
+                elif self.pool_type == 'sum':
+                    coord_mean = global_add_pool(pos, batch)
+                elif self.pool_type == 'norm':
+                    coord_sum = global_add_pool(pos, batch)
+                    num_nodes_per_graph = global_add_pool(torch.ones(pos.size(0), 1, device=pos.device), batch)
+                    coord_mean = coord_sum / (torch.sqrt(num_nodes_per_graph) + 1e-8)
+                else:
+                    coord_mean = global_mean_pool(pos, batch)
             else:
-                coord_mean = global_mean_pool(pos, batch)  # Default to mean
-        else:
-            num_graphs = batch.max().item() + 1 if batch.numel() > 0 else 1
-            coord_mean = torch.zeros(num_graphs, self.coord_dim, device=x.device)
-        
-        # Optimization suggestion 1: Process separately through small MLPs to avoid single modality dominance
-        h_processed = self.h_mlp(node_mean)  # [batch_size, hidden_dim // 2]
-        x_processed = self.x_mlp(coord_mean)  # [batch_size, hidden_dim // 2]
-        
-        # Concatenate processed features
-        feature_list = [h_processed, x_processed]
+                num_graphs = batch.max().item() + 1 if batch.numel() > 0 else 1
+                coord_mean = torch.zeros(num_graphs, self.coord_dim, device=x.device)
+            x_processed = self.x_mlp(coord_mean)    # [batch_size, hidden_dim // 2]
+            feature_list.append(x_processed)
         
         # Process fingerprint if available
         if self.use_fingerprint:
@@ -1012,8 +949,8 @@ class AEGNNM(nn.Module):
                 
                 if self.use_fingerprint_gate:
                     # Gating Mechanism
-                    # GNN features: cat(h_processed, x_processed) -> [batch_size, hidden_dim]
-                    gnn_features = torch.cat([h_processed, x_processed], dim=-1)
+                    # Use processed node features h_processed to gate fingerprint features
+                    gnn_features = h_processed  # [batch_size, hidden_dim // 2]
                     gate = self.fingerprint_gate_mlp(gnn_features)  # [batch_size, hidden_dim // 2]
                     fp_processed = fp_processed * gate
             else:
@@ -1320,7 +1257,7 @@ def create_aegnn_model(model_type='regressor', **kwargs):
 if __name__ == "__main__":
     # Test model
     model = create_aegnn_model(
-        node_features=78,
+        node_features=82,
         edge_features=9,
         hidden_dim=256,
         num_layers=6,
@@ -1332,7 +1269,7 @@ if __name__ == "__main__":
     # Simulate input
     num_nodes = 10
     num_edges = 20
-    x = torch.randn(num_nodes, 78)
+    x = torch.randn(num_nodes, 82)
     edge_index = torch.randint(0, num_nodes, (2, num_edges))
     edge_attr = torch.randn(num_edges, 4)
     pos = torch.randn(num_nodes, 3)  # 3D positions

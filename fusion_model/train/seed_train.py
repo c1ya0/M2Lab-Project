@@ -208,7 +208,7 @@ def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_mo
 
     if model_type == "DMPEGNN":
         return DMPEGNN_Fusion_Model(
-            node_features=78,
+            node_features=82,
             edge_features=9,
             descriptor_dim=200,
             output_dim=task_output_dims[0],
@@ -223,7 +223,7 @@ def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_mo
 
     if model_type == "DMPEGNN_MMB_DESC":
         dmpegnn_backbone = DMPEGNN(
-            node_features=78,
+            node_features=82,
             edge_features=9,
             hidden_dim=args.dmpegnn_hidden_dim,
             num_layers=args.dmpegnn_num_layers,
@@ -241,7 +241,6 @@ def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_mo
             dmpegnn_backbone=dmpegnn_backbone,
             mmb_model=megamolbart_model,
             task_output_dims=task_output_dims,
-            dmpegnn_graph_dim=args.dmpegnn_hidden_dim,
             **mlp_kwargs,
         )
 

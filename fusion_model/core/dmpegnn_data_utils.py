@@ -175,16 +175,18 @@ class MolecularGraphBuilder:
     
     def _calculate_node_feature_dim(self):
         """
-        Calculate node feature dimension (OGB-style: 78 dimensions)
-        - Atom Type: 44 dims (One-Hot)
+        Calculate node feature dimension (OGB-style, extended heavy elements)
+        - Atom Type: 48 dims (One-Hot)
+            - 47 common elements (H ~ Bi, non-contiguous Z)
+            - +1 for "Unknown" elements not in the list
         - Degree: 11 dims (One-Hot, 0-10)
         - Formal Charge: 11 dims (One-Hot, -5 to +5)
         - Hybridization: 5 dims (One-Hot)
         - Aromaticity: 1 dim (Binary)
         - Total Num H: 6 dims (One-Hot, 0-5)
-        Total: 44 + 11 + 11 + 5 + 1 + 6 = 78
+        Total: 48 + 11 + 11 + 5 + 1 + 6 = 82
         """
-        return 78
+        return 82
     
     def _calculate_edge_feature_dim(self):
         """
@@ -694,21 +696,22 @@ class MolecularGraphBuilder:
     
     def _get_node_features(self, mol) -> np.ndarray:
         """
-        Extract node (atom) features in OGB-style format (78 dimensions)
+        Extract node (atom) features in OGB-style format (82 dimensions)
         
         Feature breakdown:
-        1. Atom Type: 44 dims (One-Hot) - Common 44 elements in drug discovery
+        1. Atom Type: 48 dims (One-Hot) - 47 common elements in drug discovery + 1 Unknown
         2. Degree: 11 dims (One-Hot) - Number of neighbors (0-10)
         3. Formal Charge: 11 dims (One-Hot) - Formal charge (-5 to +5)
         4. Hybridization: 5 dims (One-Hot) - SP, SP2, SP3, SP3D, SP3D2
         5. Aromaticity: 1 dim (Binary) - Is aromatic
         6. Total Num H: 6 dims (One-Hot) - Number of hydrogens (0-5)
         
-        Total: 44 + 11 + 11 + 5 + 1 + 6 = 78 dimensions
+        Total: 48 + 11 + 11 + 5 + 1 + 6 = 82 dimensions
         """
-        # Common 44 elements in drug discovery (OGB-style standard list)
-        # This list includes the most common elements in pharmaceutical compounds
-        COMMON_ELEMENTS_44 = [
+        # Common elements in drug discovery (extended OGB-style list)
+        # This list includes 47 frequently occurring elements in pharmaceutical compounds.
+        # An additional "Unknown" index is reserved for elements not in this list.
+        COMMON_ELEMENTS_47 = [
             1,    # H - Hydrogen
             3,    # Li - Lithium
             5,    # B - Boron
@@ -758,35 +761,57 @@ class MolecularGraphBuilder:
             83,   # Bi - Bismuth
         ]
         
-        # Create atomic number to index mapping (0-43 for 44 elements)
-        # Index 43 is reserved for "Unknown" elements not in the list
-        atomic_num_to_idx = {atomic_num: idx for idx, atomic_num in enumerate(COMMON_ELEMENTS_44)}
-        UNKNOWN_IDX = 43  # Last index for unknown elements
+        # Atom type / degree / charge / hybridization / aromatic / num_H layout
+        # Atom Type: len(COMMON_ELEMENTS_47) known elements + 1 "Unknown"
+        atom_type_dim = len(COMMON_ELEMENTS_47) + 1
+        degree_dim = 11
+        charge_dim = 11
+        hybrid_dim = 5
+        aromatic_dim = 1
+        num_h_dim = 6
+
+        # Offsets in the final feature vector
+        atom_type_offset = 0
+        degree_offset = atom_type_offset + atom_type_dim
+        charge_offset = degree_offset + degree_dim
+        hybrid_offset = charge_offset + charge_dim
+        aromatic_offset = hybrid_offset + hybrid_dim
+        num_h_offset = aromatic_offset + aromatic_dim
+
+        total_dim = atom_type_dim + degree_dim + charge_dim + hybrid_dim + aromatic_dim + num_h_dim
+        if total_dim != self.node_feature_dim:
+            # Keep a hard check to avoid silent mismatch between layout and advertised dim
+            raise ValueError(f"Node feature dim mismatch: layout={total_dim}, configured={self.node_feature_dim}")
+
+        # Create atomic number to index mapping (0..len-1 for known elements)
+        atomic_num_to_idx = {atomic_num: idx for idx, atomic_num in enumerate(COMMON_ELEMENTS_47)}
+        # Unknown elements map to the last atom-type index (len(COMMON_ELEMENTS_47))
+        UNKNOWN_IDX = atom_type_dim - 1
         
         features = []
         
         for atom in mol.GetAtoms():
-            feature_vector = np.zeros(78, dtype=np.float32)
+            feature_vector = np.zeros(self.node_feature_dim, dtype=np.float32)
             
-            # 1. Atom Type: 44 dims (One-Hot)
+            # 1. Atom Type: atom_type_dim dims (One-Hot)
             atomic_num = atom.GetAtomicNum()
             atom_type_idx = atomic_num_to_idx.get(atomic_num, UNKNOWN_IDX)
-            feature_vector[atom_type_idx] = 1.0
+            feature_vector[atom_type_offset + atom_type_idx] = 1.0
             
             # 2. Degree: 11 dims (One-Hot, 0-10)
             degree = atom.GetDegree()
-            degree_idx = 44 + min(degree, 10)  # Offset by 44, clamp to 0-10
+            degree_idx = degree_offset + min(degree, 10)
             feature_vector[degree_idx] = 1.0
             
             # 3. Formal Charge: 11 dims (One-Hot, -5 to +5)
             formal_charge = atom.GetFormalCharge()
-            charge_idx = 44 + 11 + min(max(formal_charge + 5, 0), 10)  # Offset by 55, map -5 to +5
+            charge_idx = charge_offset + min(max(formal_charge + 5, 0), 10)
             feature_vector[charge_idx] = 1.0
             
             # 4. Hybridization: 5 dims (One-Hot)
             # RDKit hybridization enum values: SP=1, SP2=2, SP3=3, SP3D=4, SP3D2=5
             hybrid = atom.GetHybridization()
-            hybrid_idx = 44 + 11 + 11  # Offset by 66
+            hybrid_idx = hybrid_offset
             # Map RDKit hybridization to 0-4 index
             # SP=1 -> 0, SP2=2 -> 1, SP3=3 -> 2, SP3D=4 -> 3, SP3D2=5 -> 4
             hybrid_int = int(hybrid)
@@ -795,12 +820,12 @@ class MolecularGraphBuilder:
             # If unknown hybridization (0 or >5), leave as zeros
             
             # 5. Aromaticity: 1 dim (Binary)
-            aromatic_idx = 44 + 11 + 11 + 5  # Offset by 71
+            aromatic_idx = aromatic_offset
             feature_vector[aromatic_idx] = 1.0 if atom.GetIsAromatic() else 0.0
             
             # 6. Total Num H: 6 dims (One-Hot, 0-5)
             num_h = atom.GetTotalNumHs()
-            num_h_idx = 44 + 11 + 11 + 5 + 1  # Offset by 72
+            num_h_idx = num_h_offset
             num_h_clamped = min(num_h, 5)  # Clamp to 0-5
             feature_vector[num_h_idx + num_h_clamped] = 1.0
             
@@ -1222,6 +1247,8 @@ class MolecularDataset:
                 num_workers = new_workers
         
         # Prepare builder configuration for multiprocessing
+        # IMPORTANT: Keep this in sync with MolecularGraphBuilder.__init__ so that
+        # child-process builders behave identically to the main-process builder.
         builder_config = {
             'use_atomic_number': self.graph_builder.use_atomic_number,
             'use_hybridization': self.graph_builder.use_hybridization,
@@ -1233,12 +1260,15 @@ class MolecularDataset:
             'use_bond_stereo': self.graph_builder.use_bond_stereo,
             'num_conformers': self.graph_builder.num_conformers,
             'optimize_conformers': self.graph_builder.optimize_conformers,
+            'num_conformers_to_keep': self.graph_builder.num_conformers_to_keep,
             'num_threads': self.graph_builder.num_threads,
             'add_hydrogens': self.graph_builder.add_hydrogens,
             'prune_rms_thresh': self.graph_builder.prune_rms_thresh,
             'use_fingerprint': self.graph_builder.use_fingerprint,
             'fingerprint_radius': self.graph_builder.fingerprint_radius,
-            'fingerprint_bits': self.graph_builder.fingerprint_bits
+            'fingerprint_bits': self.graph_builder.fingerprint_bits,
+            'use_descriptor': self.graph_builder.use_descriptor,
+            'descriptor_dim': self.graph_builder.descriptor_dim,
         }
         
         # Prepare task arguments (data_to_process already prepared above)

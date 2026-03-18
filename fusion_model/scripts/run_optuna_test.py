@@ -12,8 +12,8 @@ os.environ["NEMO_LOG_LEVEL"] = "ERROR" # Suppress NeMo logs
 # model_types = ['MPN_MMB']
 # model_types = ['GCN_MMB_DESC']
 # model_types = ['MPN_MMB_DESC']
-# model_types = ['DMPEGNN_MMB_DESC']
-model_types = ['MMB_DESC']
+model_types = ['DMPEGNN_MMB_DESC']
+# model_types = ['MMB_DESC']
 
 # ------ dataset ------
 dataset_settings = {
