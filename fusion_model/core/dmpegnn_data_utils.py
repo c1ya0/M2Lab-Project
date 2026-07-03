@@ -1821,34 +1821,3 @@ def create_sample_dataset():
     
     df = pd.DataFrame(sample_data)
     return df
-
-
-if __name__ == "__main__":
-    # Test data processing
-    print("Testing molecular graph builder...")
-    
-    # Create sample data
-    sample_df = create_sample_dataset()
-    sample_df.to_csv('/home/vincent/drug_properties/AEGNN-M/data/sample_data.csv', index=False)
-    
-    # Test graph construction
-    graph_builder = MolecularGraphBuilder()
-    dataset = MolecularDataset(
-        data_path='/home/vincent/drug_properties/AEGNN-M/data/sample_data.csv',
-        target_column='target',
-        smiles_column='smiles',
-        graph_builder=graph_builder
-    )
-    
-    # Process graphs
-    graphs = dataset.process_graphs()
-    print(f"Successfully processed {len(graphs)} molecular graphs")
-    
-    # Test data loader
-    dataloader = dataset.get_dataloader(batch_size=2)
-    for batch in dataloader:
-        print(f"Batch size: {batch.x.shape[0]}")
-        print(f"Node feature dimension: {batch.x.shape[1]}")
-        print(f"Edge index shape: {batch.edge_index.shape}")
-        print(f"Edge feature dimension: {batch.edge_attr.shape[1]}")
-        break
