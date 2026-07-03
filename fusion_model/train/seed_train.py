@@ -16,24 +16,37 @@ from tqdm import trange
 from core.prepare_dataset import load_dataset
 from core.dmpegnn_dataset import load_dmpegnn_dataset, collate_dmpegnn_multi
 from core.models import (
-    GCN_Model, MMB_Model, Desc_Model,
-    GCN_MMB_Model, MMB_Desc_Model,
-    GCN_Desc_Model, GCN_MMB_Desc_Model,
-    MegaMolBART_Finetuned_Model, MPN_MMB_Desc_Model,
-    MPN_Model, MPN_Desc_Model, MPN_MMB_Model,
-    DMPEGNN, DMPEGNN_Fusion_Model, DMPEGNN_MMB_Desc_Model,
+    GCN_Model,
+    MegaMolBART_Finetuned_Model,
 )
 from core.train_utils import train, valid
 from core.utils import (
     set_seed, save_training_log,
     plot_loss_curve,
 )
+from core.model_factory import get_model
 
-from chemprop.models import MPN
-from chemprop.args import TrainArgs
 from nemo_chem.models.megamolbart import MegaMolBARTModel
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _apply_log1p_to_dataset(dataset, model_type: str) -> None:
+    """In-place log1p transform of regression targets.
+
+    For MoleculeDataset (prepare_dataset): transforms the .labels tensor,
+    which __getitem__ wraps into Data.y on the fly.
+
+    For DMPEGNNGraphDataset (dmpegnn_dataset): transforms every graph's .y
+    tensor (used by collate_dmpegnn_multi → batch.y) AND the .labels list
+    (used by pos_weight computation, though irrelevant for regression).
+    """
+    if model_type in ("DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"):
+        dataset.labels = [float(np.log1p(l)) for l in dataset.labels]
+        for g in dataset.graphs:
+            g.y = torch.log1p(g.y)
+    else:
+        dataset.labels = torch.log1p(dataset.labels)
 
 
 def get_args():
@@ -52,13 +65,19 @@ def get_args():
     parser.add_argument("--hp_json", type=str, required=True, help="Path to JSON file with sampled hyperparameters.")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to write checkpoints and progress.")
     parser.add_argument("--trial_number", type=int, required=True, help="Optuna trial number for display/logging.")
+    parser.add_argument("--log_transform", action="store_true", default=False,
+                        help="Apply log1p to regression targets before training and expm1 after prediction.")
+    parser.add_argument("--val_loss_threshold", type=float, default=0.0,
+                        help="Relative rise above best val_loss that counts as deterioration (0.0 = disabled).")
+    parser.add_argument("--loss_patience_limit", type=int, default=0,
+                        help="Consecutive epochs above val_loss_threshold before early stop (0 = disabled).")
     return parser.parse_args()
 
 
 def build_model_and_loaders(args: SimpleNamespace):
     """Build model and dataloaders for a single seed, mirroring optuna_train.objective."""
     # === dataset ===
-    if args.model_type in ["DMPEGNN", "DMPEGNN_MMB_DESC"]:
+    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
         train_dataset, valid_dataset, _ = load_dmpegnn_dataset(
             data_name=args.data_name,
             data_path=args.data_path,
@@ -72,7 +91,7 @@ def build_model_and_loaders(args: SimpleNamespace):
         )
 
     drop_last = True if args.mlp_norm_type == "BatchNorm" else False
-    if args.model_type in ["DMPEGNN", "DMPEGNN_MMB_DESC"]:
+    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
         # Use standard PyTorch DataLoader + custom collate so multi-conformer batches are built correctly.
         DataLoaderCls = TorchDataLoader
         collate_fn = collate_dmpegnn_multi
@@ -130,121 +149,26 @@ def build_model_and_loaders(args: SimpleNamespace):
         mlp_norm_type=args.mlp_norm_type,
     ).to(DEVICE)
 
-    return model, train_loader, valid_loader
+    # Log1p transform for regression: compress skewed target distributions so
+    # that MAE loss treats high-value and low-value samples more equally.
+    # Applied in-place BEFORE pos_weight computation (which only runs for
+    # classification anyway) so the DataLoaders already see transformed labels.
+    if args.log_transform:
+        _apply_log1p_to_dataset(train_dataset, args.model_type)
+        _apply_log1p_to_dataset(valid_dataset, args.model_type)
+
+    # Compute pos_weight for classification tasks (n_neg / n_pos)
+    pos_weight = None
+    if args.task_type == "classification":
+        labels = torch.tensor(train_dataset.labels, dtype=torch.float32)
+        n_pos = labels.sum().item()
+        n_neg = len(labels) - n_pos
+        if n_pos > 0:
+            pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32)
+
+    return model, train_loader, valid_loader, pos_weight
 
 
-def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_model=None, gcn_output_dim=None, **mlp_kwargs):
-    # 這段與 optuna_train.get_model 完全一致，保持行為相同
-    if model_type == "GCN":
-        return gcn_model
-    if model_type == "MMB":
-        return MMB_Model(megamolbart_model, task_output_dims, **mlp_kwargs)
-    if model_type == "DESC":
-        return Desc_Model(task_output_dims, **mlp_kwargs)
-    if model_type == "GCN_MMB":
-        return GCN_MMB_Model(gcn_model, megamolbart_model, gcn_output_dim, task_output_dims, **mlp_kwargs)
-    if model_type == "MMB_DESC":
-        return MMB_Desc_Model(megamolbart_model, task_output_dims, **mlp_kwargs)
-    if model_type == "GCN_DESC":
-        return GCN_Desc_Model(gcn_model, gcn_output_dim, task_output_dims, **mlp_kwargs)
-    if model_type == "GCN_MMB_DESC":
-        return GCN_MMB_Desc_Model(gcn_model, megamolbart_model, gcn_output_dim, task_output_dims, **mlp_kwargs)
-
-    if model_type == "MPN":
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for p in mpn_model.parameters():
-            p.requires_grad = True
-        return MPN_Model(mpn_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-
-    if model_type == "MPN_MMB_DESC":
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for p in mpn_model.parameters():
-            p.requires_grad = True
-        return MPN_MMB_Desc_Model(mpn_model, megamolbart_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-
-    if model_type == "MPN_DESC":
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for p in mpn_model.parameters():
-            p.requires_grad = True
-        return MPN_Desc_Model(mpn_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-
-    if model_type == "MPN_MMB":
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for p in mpn_model.parameters():
-            p.requires_grad = True
-        return MPN_MMB_Model(mpn_model, megamolbart_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-
-    if model_type == "DMPEGNN":
-        return DMPEGNN_Fusion_Model(
-            node_features=82,
-            edge_features=9,
-            descriptor_dim=200,
-            output_dim=task_output_dims[0],
-            hidden_dim=args.dmpegnn_hidden_dim,
-            num_layers=args.dmpegnn_num_layers,
-            num_heads=args.dmpegnn_num_heads,
-            dropout=args.dmpegnn_dropout,
-            dmp_steps=args.dmpegnn_dmp_steps,
-            pool_type=args.dmpegnn_pool_type,
-            use_descriptor=True,
-        )
-
-    if model_type == "DMPEGNN_MMB_DESC":
-        dmpegnn_backbone = DMPEGNN(
-            node_features=82,
-            edge_features=9,
-            hidden_dim=args.dmpegnn_hidden_dim,
-            num_layers=args.dmpegnn_num_layers,
-            num_heads=args.dmpegnn_num_heads,
-            dropout=args.dmpegnn_dropout,
-            output_dim=task_output_dims[0],
-            pool_type=args.dmpegnn_pool_type,
-            use_equivariant=True,
-            use_fingerprint=False,
-            use_descriptor=False,
-            descriptor_dim=200,
-            dmp_steps=args.dmpegnn_dmp_steps,
-        ).to(DEVICE)
-        return DMPEGNN_MMB_Desc_Model(
-            dmpegnn_backbone=dmpegnn_backbone,
-            mmb_model=megamolbart_model,
-            task_output_dims=task_output_dims,
-            **mlp_kwargs,
-        )
-
-    raise ValueError(f"Unknown model type: {model_type}")
 
 
 def main():
@@ -259,13 +183,14 @@ def main():
 
     set_seed(args.seed)
 
-    model, train_loader, valid_loader = build_model_and_loaders(args)
+    model, train_loader, valid_loader, pos_weight = build_model_and_loaders(args)
 
     # Loss
     if args.loss_function == "MAE":
         loss_fn = torch.nn.L1Loss()
     elif args.loss_function == "BCE":
-        loss_fn = torch.nn.BCEWithLogitsLoss()
+        pw = pos_weight.to(DEVICE) if pos_weight is not None else None
+        loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
     else:
         raise ValueError(f"Unsupported loss function: {args.loss_function}")
 
@@ -274,20 +199,12 @@ def main():
 
     scheduler = None
     scheduler_type = getattr(args, "scheduler_type", "cosine")
-    if scheduler_type in ("cosine", "step"):
-        total_steps = len(train_loader) * args.num_epochs
-        if scheduler_type == "cosine":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=total_steps,
-            )
-        else:
-            step_size = max(1, int(0.7 * total_steps))
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=step_size,
-                gamma=0.1,
-            )
+    if scheduler_type == "cosine":
+        expected_epochs = min(args.num_epochs, args.patience * 5)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=expected_epochs,
+        )
     elif scheduler_type == "plateau":
         mode = "min" if args.metric == "MAE" else "max"
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -309,8 +226,13 @@ def main():
     else:
         best_valid_metric = float("inf")
 
+    best_epoch = None
     train_loss_list, valid_loss_list = [], []
     patience_counter = 0
+
+    best_valid_loss = float("inf")
+    loss_no_improve_count = 0
+    stopped_by = "max_epoch"
 
     progress_path = os.path.join(raw_args.output_dir, "training_progress.json")
     summary_path = os.path.join(raw_args.output_dir, "training_summary.json")
@@ -323,25 +245,23 @@ def main():
     else:
         epoch_iter = range(args.num_epochs)
     for epoch in epoch_iter:
-        if scheduler_type in ("cosine", "step"):
-            train_loss = train(model, train_loader, loss_fn, optimizer, args.model_type, DEVICE, scheduler)
-        else:
-            train_loss = train(model, train_loader, loss_fn, optimizer, args.model_type, DEVICE, scheduler=None)
+        train_loss = train(model, train_loader, loss_fn, optimizer, args.model_type, DEVICE, scheduler=None)
 
         valid_loss, valid_metric = valid(
             model, valid_loader, loss_fn,
             args.model_type, metric, args.task_type, DEVICE,
+            log_transform=args.log_transform,
         )
+
+        if scheduler_type == "cosine" and scheduler is not None:
+            scheduler.step()
 
         train_loss_list.append(train_loss)
         valid_loss_list.append(valid_loss)
 
-        # Plateau scheduler：使用 validation 指標
+        # Plateau scheduler：使用 validation 指標（與 early stopping 同一尺度）
         if scheduler_type == "plateau" and scheduler is not None:
-            if args.metric == "MAE":
-                scheduler.step(valid_loss)
-            else:
-                scheduler.step(valid_metric)
+            scheduler.step(valid_metric)
 
         # 更新 progress（父 process 用來做 epoch-level pruning）
         progress = {
@@ -370,7 +290,25 @@ def main():
             patience_counter += 1
 
         if patience_counter >= args.patience:
+            stopped_by = "metric_patience"
             break
+
+        # val_loss early stopping (OR condition): fires when loss rises > threshold
+        # for loss_patience_limit consecutive epochs, regardless of metric state.
+        if args.loss_patience_limit > 0:
+            if valid_loss < best_valid_loss:
+                best_valid_loss = float(valid_loss)
+                loss_no_improve_count = 0
+            else:
+                relative_rise = (valid_loss - best_valid_loss) / (best_valid_loss + 1e-8)
+                if relative_rise > args.val_loss_threshold:
+                    loss_no_improve_count += 1
+                else:
+                    loss_no_improve_count = 0
+
+            if loss_no_improve_count >= args.loss_patience_limit:
+                stopped_by = "loss_patience"
+                break
 
     training_end_time = time.time()
     training_time = training_end_time - training_start_time
@@ -378,8 +316,9 @@ def main():
     # 寫 summary，給父 process 匯總
     summary = {
         "best_valid_metric": best_valid_metric,
-        "best_epoch": best_epoch if "best_epoch" in locals() else None,
+        "best_epoch": best_epoch,
         "train_time_sec": training_time,
+        "stopped_by": stopped_by,
     }
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)

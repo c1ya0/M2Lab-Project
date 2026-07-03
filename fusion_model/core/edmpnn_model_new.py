@@ -236,6 +236,22 @@ class GATEGNNLayer(MessagePassing):
             nn.Linear(out_channels, 1),
             nn.Sigmoid()  # Output gating value in [0, 1]
         )
+
+        # Geometric gate: modulates node features using local geometric context (m_i).
+        # Input: cat([h, node_messages]) with shape [N, 2*out_channels].
+        #   - h            : current node features (2D graph information)
+        #   - node_messages: Σ_j e_ij, aggregated from dist_sq-based edge features (fully
+        #                    translation- and rotation-invariant 3D geometric summary)
+        # Output: per-dimension Sigmoid gate [N, out_channels] applied to phi_h output.
+        # This replaces the absolute-coordinate pos_gate from the old AEGNNLayer, preserving
+        # EGNN's equivariance while restoring "per-layer 3D-aware node feature modulation".
+        self.geo_gate = nn.Sequential(
+            nn.Linear(2 * out_channels, out_channels),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(out_channels, out_channels),
+            nn.Sigmoid()
+        )
         
         # Initialize parameters
         self.reset_parameters()
@@ -248,6 +264,11 @@ class GATEGNNLayer(MessagePassing):
         nn.init.xavier_uniform_(self.att)
         if self.att_edge is not None:
             nn.init.xavier_uniform_(self.att_edge)
+        # Initialize geo_gate's final Linear bias to +2.0 so that sigmoid(2.0) ≈ 0.88,
+        # making the gate start near-open (close to identity) at the beginning of training.
+        # This prevents phi_h output from being pathologically halved at init (default ≈ 0.5).
+        # The gate gradually learns to deviate from open as training progresses.
+        nn.init.constant_(self.geo_gate[-2].bias, 2.0)
     
     def forward(self, x, edge_index, edge_attr=None, pos=None, b2revb=None):
         """
@@ -372,8 +393,18 @@ class GATEGNNLayer(MessagePassing):
         # Aggregate node messages m_i = Σ_j e_ij, to target nodes i = edge_index[1]
         node_messages = torch.zeros(num_nodes, h.size(-1), device=device, dtype=h.dtype)
         node_messages.index_add_(0, edge_index[1], e_ij.to(h.dtype))
-        
-        h = self.phi_h(torch.cat([h, node_messages], dim=-1))
+
+        # phi_h: standard EGNN node update
+        phi_h_input = torch.cat([h, node_messages], dim=-1)  # [N, 2*out_channels]
+        h_candidate = self.phi_h(phi_h_input)
+
+        # geo_gate: per-dimension sigmoid gate driven by local geometric context (m_i).
+        # Uses the same input as phi_h so no extra computation of m_i is needed.
+        # h is the pre-update node feature (2D side); node_messages is the invariant
+        # 3D geometric summary. Together they let the gate "decide" which feature
+        # dimensions to amplify or suppress based on the local 3D environment.
+        gate = self.geo_gate(phi_h_input)  # [N, out_channels], values in (0, 1)
+        h = h_candidate * gate
         return h, pos
 
     @staticmethod
@@ -983,26 +1014,69 @@ class AEGNNM(nn.Module):
         return logits, attention_weights
     
     def _apply_random_rotation(self, pos, batch=None):
-        """Apply random 3D rotation to node positions"""
+        """Apply random 3D rotation to node positions.
+
+        Batch path is fully vectorized via torch.bmm: one rotation matrix per
+        graph is generated as a batch tensor [N_graphs, 3, 3], expanded to
+        per-node [num_nodes, 3, 3] via batch-index fancy-indexing, then applied
+        with a single bmm call.  This avoids N serial Python loop iterations
+        and N serial GPU kernel launches compared to the previous for-loop
+        implementation.
+        """
         device = pos.device
         dtype = pos.dtype
-        
+
         if batch is None:
-            # Single graph rotation
+            # Single graph: keep the original lightweight path
             rot_matrix = self._get_random_rotation_matrix(dtype=dtype, device=device)
             return (pos @ rot_matrix).to(dtype)
-        else:
-            # Batch rotation (rotate each graph independently)
-            num_graphs = batch.max().item() + 1
-            pos_rotated = torch.zeros_like(pos)
-            
-            for i in range(num_graphs):
-                mask = (batch == i)
-                if mask.sum() > 0:
-                    rot_matrix = self._get_random_rotation_matrix(dtype=dtype, device=device)
-                    pos_rotated[mask] = (pos[mask] @ rot_matrix).to(dtype)
-            
-            return pos_rotated
+
+        # Batch path (vectorized)
+        num_graphs = batch.max().item() + 1
+
+        # Generate all N rotation matrices at once [N, 3, 3]
+        rot_matrices = self._get_batch_rotation_matrices(num_graphs, dtype=dtype, device=device)
+
+        # Expand to per-node via fancy-indexing: [num_nodes, 3, 3]
+        node_rot = rot_matrices[batch]
+
+        # Single bmm: [num_nodes, 1, 3] @ [num_nodes, 3, 3] → [num_nodes, 1, 3]
+        return torch.bmm(pos.unsqueeze(1), node_rot).squeeze(1).to(dtype)
+
+    def _get_batch_rotation_matrices(self, num_graphs: int,
+                                     dtype=torch.float32, device=None):
+        """Generate N random 3D rotation matrices as a batch tensor [N, 3, 3].
+
+        Fully vectorized Rodrigues' formula: all N axes, angles, skew matrices,
+        and final rotations are computed in parallel without any Python loop.
+        """
+        device = device or torch.device('cpu')
+
+        # Random unit axes [N, 3]
+        axes = torch.randn(num_graphs, 3, device=device, dtype=dtype)
+        axes = axes / (axes.norm(dim=1, keepdim=True) + 1e-8)
+
+        # Random angles [N]
+        thetas = torch.rand(num_graphs, device=device, dtype=dtype) * (2 * math.pi)
+
+        # Build skew-symmetric cross-product matrices K [N, 3, 3]
+        # K = [[0, -z, y], [z, 0, -x], [-y, x, 0]]
+        x, y, z = axes[:, 0], axes[:, 1], axes[:, 2]
+        zeros = torch.zeros(num_graphs, device=device, dtype=dtype)
+
+        K = torch.stack([
+            torch.stack([zeros,  -z,     y    ], dim=1),
+            torch.stack([z,      zeros,  -x   ], dim=1),
+            torch.stack([-y,     x,      zeros], dim=1),
+        ], dim=1)  # [N, 3, 3]
+
+        # Rodrigues: R = I + sin(θ)·K + (1 − cos(θ))·K²
+        sin_t = thetas.sin().view(num_graphs, 1, 1)
+        cos_t = thetas.cos().view(num_graphs, 1, 1)
+        I = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(num_graphs, -1, -1)
+        K2 = torch.bmm(K, K)
+
+        return I + sin_t * K + (1 - cos_t) * K2  # [N, 3, 3]
             
     def _get_random_rotation_matrix(self, dtype=torch.float32, device=None):
         """Get a random 3D rotation matrix"""

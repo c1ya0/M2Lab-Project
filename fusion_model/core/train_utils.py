@@ -8,6 +8,7 @@ from typing import Tuple
 def train(model, loader, loss_fn, optimizer, MODEL_TYPE, DEVICE, scheduler=None)-> float:
     model.train()
     total_loss = 0
+    num_batches = 0
     
     for batch in loader: 
         if batch.batch.size(0) < 2:
@@ -21,6 +22,7 @@ def train(model, loader, loss_fn, optimizer, MODEL_TYPE, DEVICE, scheduler=None)
         # backpropagation
         optimizer.zero_grad()  # clear gradients to prevent accumulation
         loss.backward()  # compute gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()  # update weights
         
         if scheduler is not None:
@@ -28,13 +30,22 @@ def train(model, loader, loss_fn, optimizer, MODEL_TYPE, DEVICE, scheduler=None)
         
         # total loss
         total_loss += loss.item()  # float
+        num_batches += 1
     
     # average loss  
-    avg_loss = total_loss / len(loader)
+    avg_loss = total_loss / max(num_batches, 1)
     return avg_loss
 
 
-def valid(model, loader, loss_fn, MODEL_TYPE, metric, TASK_TYPE, DEVICE) -> Tuple[float, float]:
+def valid(model, loader, loss_fn, MODEL_TYPE, metric, TASK_TYPE, DEVICE, log_transform: bool = False) -> Tuple[float, float]:
+    """Evaluate on validation set.
+
+    log_transform: mirror of the flag in test().  When True (regression with
+        log1p targets), apply expm1 to predictions and labels *before* computing
+        the metric so that the reported validation score is on the original scale
+        (e.g., original-unit MAE).  The loss is always computed in log space
+        (consistent with training) and is not affected by this flag.
+    """
     model.eval()
     total_loss = 0
     all_preds = []
@@ -47,7 +58,7 @@ def valid(model, loader, loss_fn, MODEL_TYPE, metric, TASK_TYPE, DEVICE) -> Tupl
             batch = batch.to(DEVICE)      
             # forward pass
             output = model_forward(model, batch, MODEL_TYPE)  
-            # calculating loss
+            # calculating loss (always in log space when log_transform=True)
             loss = loss_fn(output.view(-1), batch.y)
             
             # total loss
@@ -66,12 +77,29 @@ def valid(model, loader, loss_fn, MODEL_TYPE, metric, TASK_TYPE, DEVICE) -> Tupl
     # average metric
     all_preds = np.concatenate(all_preds)
     all_labels = np.concatenate(all_labels)
+
+    if log_transform and TASK_TYPE == 'regression':
+        # Inverse log1p so the metric is on the original (interpretable) scale.
+        # Early stopping and HP selection therefore operate on original-scale
+        # MAE, making study.best_value directly comparable to test results.
+        all_preds  = np.expm1(all_preds)
+        all_labels = np.expm1(all_labels)
+
     metric_score = metric(all_labels, all_preds)
         
     return avg_loss, metric_score
 
 
-def test(model, loader, metric, TASK_TYPE, MODEL_TYPE, DEVICE) -> float:           
+def test(model, loader, metric, TASK_TYPE, MODEL_TYPE, DEVICE, log_transform: bool = False) -> float:
+    """Run inference on the test set and return (metric_score, all_preds).
+
+    log_transform: if True, apply torch.expm1 to both predictions and labels
+        before computing the metric.  Use this when the model was trained on
+        log1p-transformed regression targets so that the reported score is in
+        the original (interpretable) scale.  For rank-based metrics such as
+        Spearman, the result is identical regardless of this flag, but for MAE
+        the original-scale value is required to be comparable with benchmarks.
+    """
     model.eval()
     all_preds = []
     all_labels = []     
@@ -92,6 +120,10 @@ def test(model, loader, metric, TASK_TYPE, MODEL_TYPE, DEVICE) -> float:
     if TASK_TYPE == 'regression':
         all_preds = torch.tensor(all_preds, dtype=torch.float32)
         all_labels = torch.tensor(all_labels, dtype=torch.float32)
+        if log_transform:
+            # Inverse the log1p applied during training → original scale
+            all_preds  = torch.expm1(all_preds)
+            all_labels = torch.expm1(all_labels)
     elif TASK_TYPE == 'classification':
         all_preds = torch.tensor(all_preds, dtype=torch.float32)
         all_preds = torch.sigmoid(all_preds)  # convert to a probability value between 0 and 1
@@ -129,9 +161,16 @@ def model_forward(model, data, model_type):
             n_edges = data.edge_index.size(1)
             edge_attr = torch.zeros(n_edges, 9, device=data.x.device, dtype=data.x.dtype)
         pos = getattr(data, 'pos', None)
-        descriptor = data.descriptor if hasattr(data, 'descriptor') and data.descriptor is not None else torch.zeros(data.num_graphs if hasattr(data, 'num_graphs') else data.batch.max().item() + 1, 200, device=data.x.device, dtype=data.x.dtype)
         molecule_idx = getattr(data, 'molecule_idx', None)
-        return model(data.x, data.edge_index, edge_attr, data.batch, descriptor, pos=pos, task_index=0, molecule_idx=molecule_idx)
+        return model(data.x, data.edge_index, edge_attr, data.batch, pos=pos, task_index=0, molecule_idx=molecule_idx)
+    elif model_type == 'DMPEGNN_DESC':
+        edge_attr = getattr(data, 'edge_attr', None)
+        if edge_attr is None:
+            n_edges = data.edge_index.size(1)
+            edge_attr = torch.zeros(n_edges, 9, device=data.x.device, dtype=data.x.dtype)
+        pos = getattr(data, 'pos', None)
+        molecule_idx = getattr(data, 'molecule_idx', None)
+        return model(data.x, data.edge_index, edge_attr, data.descriptor, data.batch, task_index=0, pos=pos, molecule_idx=molecule_idx)
     elif model_type == 'DMPEGNN_MMB_DESC':
         edge_attr = getattr(data, 'edge_attr', None)
         if edge_attr is None:

@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -21,7 +22,8 @@ from core.models import (
 )
 from core.train_utils import test
 from core.utils import set_seed, save_testing_log
-from train.optuna_train import get_args, get_model
+from train.optuna_train import get_args
+from core.model_factory import get_model
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -73,6 +75,8 @@ def main():
     # === paths ===
     FINAL_DIR = os.path.join(SAVE_DIR, "best_trial_models_50")
 
+    dmpegnn_model_types = {'DMPEGNN', 'DMPEGNN_DESC', 'DMPEGNN_MMB_DESC'}
+
     all_test_scores = []
     for SEED in args.seed_list:
         print(f"\n=== Running with SEED = {SEED} ===")
@@ -82,7 +86,7 @@ def main():
         best_model_path = os.path.join(FINAL_DIR, f"best_model_seed({SEED}).pth")
 
         # === test dataset ===
-        if args.model_type in ['DMPEGNN', 'DMPEGNN_MMB_DESC']:
+        if args.model_type in dmpegnn_model_types:
             _, _, test_dataset = load_dmpegnn_dataset(
                 data_name=args.data_name,
                 data_path=args.data_path,
@@ -94,7 +98,20 @@ def main():
                 data_path=args.data_path,
                 seed=SEED,
             )
-        if args.model_type in ['DMPEGNN', 'DMPEGNN_MMB_DESC']:
+
+        # Apply the same log1p transform used during training so that test
+        # batch.y values are in log space; test() will expm1 them back before
+        # computing the final metric (ensures MAE is reported in original scale).
+        log_transform = getattr(args, 'log_transform', False)
+        if log_transform:
+            if args.model_type in dmpegnn_model_types:
+                test_dataset.labels = [float(np.log1p(l)) for l in test_dataset.labels]
+                for g in test_dataset.graphs:
+                    g.y = torch.log1p(g.y)
+            else:
+                test_dataset.labels = torch.log1p(test_dataset.labels)
+
+        if args.model_type in dmpegnn_model_types:
             test_loader = TorchDataLoader(test_dataset, args.batch_size, shuffle=False, collate_fn=collate_dmpegnn_multi)
         else:
             test_loader = PyGDataLoader(test_dataset, args.batch_size, shuffle=False)
@@ -147,8 +164,11 @@ def main():
         metric = Evaluator(name=args.metric)
         
         # === testing ===
+        # log_transform=True: expm1 restores predictions/labels to original
+        # scale before metric computation (needed for MAE; Spearman is invariant).
         with torch.no_grad():
-            test_score = test(model, test_loader, metric, args.task_type, args.model_type, DEVICE)
+            test_score = test(model, test_loader, metric, args.task_type, args.model_type, DEVICE,
+                              log_transform=log_transform)
         all_test_scores.append((SEED, test_score))
         # print(f"[Seed {SEED}] Test {args.metric}: {test_score:.3f}")
         print(f"[Seed {SEED}] Test {args.metric}: {test_score[0]:.3f}")

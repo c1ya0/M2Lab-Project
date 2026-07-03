@@ -21,172 +21,77 @@ from tqdm import trange
 # -------------------------------------------------------
 from core.prepare_dataset import load_dataset
 from core.dmpegnn_dataset import load_dmpegnn_dataset
-from core.models import (
-    GCN_Model, MMB_Model, Desc_Model, 
-    GCN_MMB_Model, MMB_Desc_Model, 
-    GCN_Desc_Model, GCN_MMB_Desc_Model,
-    MegaMolBART_Finetuned_Model, MPN_MMB_Desc_Model, 
-    MPN_Model, MPN_Desc_Model, MPN_MMB_Model,
-    DMPEGNN,  # backbone imported from core.edmpnn_model_new.AEGNNM as alias
-    DMPEGNN_Fusion_Model,
-    DMPEGNN_MMB_Desc_Model,
-)
 from core.train_utils import train, valid
 from core.utils import (
     set_seed, save_training_log, 
     plot_loss_curve, format_time
 )
 
-# === D-MPNN ===
-from chemprop.models import MPN
-from chemprop.args import TrainArgs
-
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def get_dataset_train_size(args) -> int:
+    """Load training set once (seed=1) to determine n_train for capacity scaling."""
+    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
+        train_ds, _, _ = load_dmpegnn_dataset(
+            data_name=args.data_name,
+            data_path=args.data_path,
+            seed=1,
+        )
+    else:
+        train_ds, _, _ = load_dataset(
+            data_name=args.data_name,
+            data_path=args.data_path,
+            seed=1,
+        )
+    return len(train_ds)
 
 KALEIDO_AVAILABLE = True
 
 # -------------------- Argument Parsing --------------------
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_type', type=str, required=True, choices=['GCN', 'MMB', 'DESC', 'GCN_MMB', 'MMB_DESC', 'GCN_DESC', 'GCN_MMB_DESC', 'MPN_MMB_DESC', 'MPN', 'MPN_DESC', 'MPN_MMB', 'DMPEGNN', 'DMPEGNN_MMB_DESC'])
+    parser.add_argument('--model_type', type=str, required=True, choices=['GCN', 'MMB', 'DESC', 'GCN_MMB', 'MMB_DESC', 'GCN_DESC', 'GCN_MMB_DESC', 'MPN_MMB_DESC', 'MPN', 'MPN_DESC', 'MPN_MMB', 'DMPEGNN', 'DMPEGNN_DESC', 'DMPEGNN_MMB_DESC'])
     parser.add_argument('--data_name', type=str, required=True)
     parser.add_argument('--task_type', type=str, required=True, choices=['regression', 'classification'])
     parser.add_argument('--loss_function', type=str, required=True, choices=['MAE', 'BCE'])
     parser.add_argument('--metric', type=str, required=True, choices=['MAE', 'Spearman', 'ROC-AUC', 'PR-AUC'])
     parser.add_argument('--num_epochs', type=int, default=1000)
-    parser.add_argument('--patience', type=int, default=100)
+    parser.add_argument('--patience', type=int, default=50)
     parser.add_argument('--pretrained_path', type=str, default='/models/MegaMolBART_0_2_0.nemo')
     parser.add_argument('--data_path', type=str, default='data/data_tdc')
     parser.add_argument('--seed_list', type=int, nargs='+', default=[1, 2, 3, 4, 5])
     parser.add_argument('--num_tasks', type=int, default=1)
     parser.add_argument('--num_trials', type=int, default=5)
+    parser.add_argument('--log_transform', action='store_true', default=False,
+                        help='Apply log1p to regression targets before training and expm1 after prediction.')
+    parser.add_argument('--val_loss_threshold', type=float, default=0.0,
+                        help='Relative rise above best val_loss that counts as deterioration (0.0 = disabled).')
     return parser.parse_args()
 
-# -------------------- Model Initialization --------------------
-def get_model(args, model_type, task_output_dims, gcn_model=None, megamolbart_model=None, gcn_output_dim=None, **mlp_kwargs):
-    if model_type == 'GCN': 
-        return gcn_model
-    if model_type == 'MMB': 
-        return MMB_Model(megamolbart_model, task_output_dims, **mlp_kwargs)
-    if model_type == 'DESC': 
-        return Desc_Model(task_output_dims, **mlp_kwargs)
-    if model_type == 'GCN_MMB': 
-        return GCN_MMB_Model(gcn_model, megamolbart_model, gcn_output_dim, task_output_dims, **mlp_kwargs)
-    if model_type == 'MMB_DESC': 
-        return MMB_Desc_Model(megamolbart_model, task_output_dims, **mlp_kwargs)
-    if model_type == 'GCN_DESC': 
-        return GCN_Desc_Model(gcn_model, gcn_output_dim, task_output_dims, **mlp_kwargs)
-    if model_type == 'GCN_MMB_DESC': 
-        return GCN_MMB_Desc_Model(gcn_model, megamolbart_model, gcn_output_dim, task_output_dims, **mlp_kwargs)
-    
-    if model_type == 'MPN':       
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for param in mpn_model.parameters():
-            param.requires_grad = True  # unfreeze
-        return MPN_Model(mpn_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-    
-    if model_type == 'MPN_MMB_DESC':
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for param in mpn_model.parameters():
-            param.requires_grad = True  # unfreeze
-        return MPN_MMB_Desc_Model(mpn_model, megamolbart_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-    
-    if model_type == 'MPN_DESC':
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for param in mpn_model.parameters():
-            param.requires_grad = True  # unfreeze
-        return MPN_Desc_Model(mpn_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-    
-    if model_type == 'MPN_MMB':
-        mpn_args = TrainArgs()
-        mpn_args.hidden_size = args.mpn_hidden_size
-        mpn_args.depth = args.mpn_depth
-        mpn_args.dropout = args.mpn_dropout
-        mpn_args.number_of_molecules = 1
-        mpn_args.dataset_type = args.task_type
-        mpn_args.aggregation = args.mpn_aggregation
-        mpn_args.activation = args.mpn_activation
-        mpn_model = MPN(mpn_args).to(DEVICE)
-        for param in mpn_model.parameters():
-            param.requires_grad = True  # unfreeze
-        return MPN_MMB_Model(mpn_model, megamolbart_model, task_output_dims, mpn_args.hidden_size, **mlp_kwargs)
-
-    if model_type == 'DMPEGNN':
-        return DMPEGNN_Fusion_Model(
-            node_features=82,
-            edge_features=9,
-            descriptor_dim=200,
-            output_dim=task_output_dims[0],
-            hidden_dim=args.dmpegnn_hidden_dim,
-            num_layers=args.dmpegnn_num_layers,
-            num_heads=args.dmpegnn_num_heads,
-            dropout=args.dmpegnn_dropout,
-            dmp_steps=args.dmpegnn_dmp_steps,
-            pool_type=args.dmpegnn_pool_type,
-            use_descriptor=True,
-        )
-
-    if model_type == 'DMPEGNN_MMB_DESC':
-        # Use DMPEGNN as graph encoder (no descriptor inside backbone), then fuse with MMB + DESC in MLP.
-        dmpegnn_backbone = DMPEGNN(
-            node_features=82,
-            edge_features=9,
-            hidden_dim=args.dmpegnn_hidden_dim,
-            num_layers=args.dmpegnn_num_layers,
-            num_heads=args.dmpegnn_num_heads,
-            dropout=args.dmpegnn_dropout,
-            output_dim=task_output_dims[0],
-            pool_type=args.dmpegnn_pool_type,
-            use_equivariant=True,
-            use_fingerprint=False,
-            use_descriptor=False,
-            descriptor_dim=200,
-            dmp_steps=args.dmpegnn_dmp_steps,
-        ).to(DEVICE)
-        return DMPEGNN_MMB_Desc_Model(
-            dmpegnn_backbone=dmpegnn_backbone,
-            mmb_model=megamolbart_model,
-            task_output_dims=task_output_dims,
-            **mlp_kwargs,
-        )
-    
-    raise ValueError(f"Unknown model type: {model_type}")
 
 # -------------------- Optuna Hyperparameter Sampling --------------------
-def sample_mlp_params(trial):
+def sample_mlp_params(trial, n_train: int = None):
+    # Dynamic capacity tiers based on training set size
+    # Small: n_train < 700 | Medium: 700 <= n_train < 2000 | Large: n_train >= 2000
+    if n_train is not None and n_train < 700:
+        hidden_choices = [32, 64, 128]
+        max_layers = 3
+    elif n_train is not None and n_train < 2000:
+        hidden_choices = [64, 128, 256]
+        max_layers = 4
+    else:
+        hidden_choices = [16, 32, 64, 128, 256]
+        max_layers = 5
     return {
-        'mlp_hidden_dim': trial.suggest_categorical('mlp_hidden_dim', [16, 32, 64, 128, 256]),
-        'mlp_num_layers': trial.suggest_int('mlp_num_layers', 1, 5),
+        'mlp_hidden_dim': trial.suggest_categorical('mlp_hidden_dim', hidden_choices),
+        'mlp_num_layers': trial.suggest_int('mlp_num_layers', 1, max_layers),
         'mlp_activation': trial.suggest_categorical('mlp_activation', ['relu', 'gelu']),
         'mlp_dropout': trial.suggest_float('mlp_dropout', 0.0, 0.5, step=0.05),
-        'mlp_norm_type': trial.suggest_categorical('mlp_norm_type', ['LayerNorm', 'BatchNorm'])
+        'mlp_norm_type': trial.suggest_categorical('mlp_norm_type', ['LayerNorm']),
     }
 
 def sample_gcn_params(trial):
@@ -209,41 +114,54 @@ def sample_mpn_params(trial):
         'mpn_aggregation': trial.suggest_categorical('mpn_aggregation', ['mean', 'sum', 'norm'])
     }
 
-def sample_dmpegnn_params(trial):
+def sample_dmpegnn_params(trial, n_train: int = None):
+    # Dynamic capacity tiers based on training set size
+    # Small:  n_train < 700   → hidden [64, 128],        max_layers 3
+    # Medium: 700 ≤ n_train < 2000 → hidden [128, 256, 384], max_layers 4
+    # Large:  n_train ≥ 2000  → hidden [128, 256, 384],  max_layers 6
+    if n_train is not None and n_train < 700:
+        hidden_choices = [64, 128]
+        max_layers = 3
+    elif n_train is not None and n_train < 2000:
+        hidden_choices = [128, 256, 384]
+        max_layers = 4
+    else:
+        hidden_choices = [128, 256, 384]
+        max_layers = 6
     return {
-        'dmpegnn_hidden_dim': trial.suggest_categorical('dmpegnn_hidden_dim', [128, 256, 384]),
-        'dmpegnn_num_layers': trial.suggest_int('dmpegnn_num_layers', 2, 6),
+        'dmpegnn_hidden_dim': trial.suggest_categorical('dmpegnn_hidden_dim', hidden_choices),
+        'dmpegnn_num_layers': trial.suggest_int('dmpegnn_num_layers', 2, max_layers),
         'dmpegnn_num_heads': trial.suggest_categorical('dmpegnn_num_heads', [4, 8]),
-        'dmpegnn_dropout': trial.suggest_float('dmpegnn_dropout', 0.0, 0.3, step=0.05),
+        'dmpegnn_dropout': trial.suggest_float('dmpegnn_dropout', 0.3, 0.5, step=0.05),
         'dmpegnn_dmp_steps': trial.suggest_int('dmpegnn_dmp_steps', 1, 4),
         'dmpegnn_pool_type': trial.suggest_categorical('dmpegnn_pool_type', ['mean', 'sum']),
     }
 
 def sample_optimizer_params(trial):
     return {
-        'lr': trial.suggest_float('lr', 1e-5, 1e-2, log=True),
-        'batch_size': trial.suggest_categorical('batch_size', [16, 32, 64]),
-        'weight_decay': trial.suggest_float('weight_decay', 1e-5, 1e-2, log=True),
-        # scheduler_type: 決定學習率隨時間如何變化
-        'scheduler_type': trial.suggest_categorical('scheduler_type', ['cosine', 'step', 'plateau']),
+        'lr': trial.suggest_float('lr', 1e-5, 1e-3, log=True),
+        'batch_size': trial.suggest_categorical('batch_size', [32, 64]),
+        'weight_decay': trial.suggest_float('weight_decay', 1e-4, 1e-2, log=True),
+        # scheduler_type: StepLR 移除，僅保留 cosine 與 plateau
+        'scheduler_type': trial.suggest_categorical('scheduler_type', ['cosine', 'plateau']),
     }
 
-def sample_hyperparameters(trial, args):
+def sample_hyperparameters(trial, args, n_train: int = None):
     sampled = sample_optimizer_params(trial)
-    sampled.update(sample_mlp_params(trial))
+    sampled.update(sample_mlp_params(trial, n_train=n_train))
     if 'GCN' in args.model_type:
         sampled.update(sample_gcn_params(trial))
         sampled['GCN_OUTPUT_DIM'] = 1 if args.model_type == 'GCN' else int(sampled['gcn_output_dim'])
     if 'MPN' in args.model_type:
         sampled.update(sample_mpn_params(trial))
     if 'DMPEGNN' in args.model_type:
-        sampled.update(sample_dmpegnn_params(trial))
+        sampled.update(sample_dmpegnn_params(trial, n_train=n_train))
     return sampled
 
 # -------------------- Objective Function for Optuna --------------------
-def objective(trial, args):
+def objective(trial, args, n_train: int = None):
     # === hyperparameters ===
-    sampled = sample_hyperparameters(trial, args)
+    sampled = sample_hyperparameters(trial, args, n_train=n_train)
     for k, v in sampled.items():
         setattr(args, k, v)
 
@@ -310,6 +228,11 @@ def objective(trial, args):
             seed_output_dir,
             "--trial_number",
             str(trial.number),
+            *(["--log_transform"] if args.log_transform else []),
+            "--val_loss_threshold",
+            str(args.val_loss_threshold),
+            "--loss_patience_limit",
+            str(args.loss_patience_limit),
         ]
 
         # seed 1: 直接輸出到前景，讓 tqdm 進度條顯示在主 terminal
@@ -350,14 +273,13 @@ def objective(trial, args):
                         continue
 
             if progress_list:
-                # 使用所有 seed 目前最新的 epoch 的最大值當作 step
-                current_epoch = max(p.get("epoch", -1) for p in progress_list)
+                # 使用所有 seed 目前 epoch 的最小值當作 step（確保所有 seed 都已到達此 epoch）
+                current_epoch = min(p.get("epoch", -1) for p in progress_list)
                 if current_epoch > last_reported_epoch:
-                    # 用 valid_loss 的平均維持原本 pruning 的語意
-                    losses = [p.get("valid_loss") for p in progress_list if p.get("valid_loss") is not None]
-                    if losses:
-                        avg_valid_loss = float(np.mean(losses))
-                        trial.report(avg_valid_loss, current_epoch)
+                    metrics = [p.get("valid_metric") for p in progress_list if p.get("valid_metric") is not None]
+                    if metrics:
+                        avg_valid_metric = float(np.mean(metrics))
+                        trial.report(avg_valid_metric, current_epoch)
                         last_reported_epoch = current_epoch
                         if trial.should_prune():
                             # 終止所有 seed 的訓練
@@ -386,8 +308,8 @@ def objective(trial, args):
                     continue
 
         if not valid_metrics:
-            # 若所有 seed 都失敗，讓這個 trial 變得很差
-            return float("inf")
+            # 若所有 seed 都失敗，依 direction 回傳最差值
+            return float("inf") if args.metric in minimize_metrics else float("-inf")
 
         trial.set_user_attr("valid_metrics", [float(v) for v in valid_metrics])
         trial.set_user_attr("trial_dir", TRIAL_CHECKPOINT_DIR)
@@ -418,12 +340,68 @@ if __name__ == '__main__':
     elif args.metric in ['Spearman', 'ROC-AUC', 'PR-AUC']:
         direction = 'maximize'
 
+    # Compute training set size once for dynamic capacity scaling and patience.
+    # get_dataset_train_size() also writes the seed=1 cache as a side effect.
+    n_train = get_dataset_train_size(args)
+    tier = "small (<700)" if n_train < 700 else ("medium (700–2000)" if n_train < 2000 else "large (≥2000)")
+    print(f"[INFO] n_train={n_train} → capacity tier: {tier}")
+
+    # Pre-warm dataset caches for all seeds.
+    # DMPEGNN models require expensive 3D conformer generation (ETKDG + MMFF) that is
+    # cached per-seed under data/processed_tdc_data_dmpegnn/<dataset>/seed<N>/.
+    # Without this step, seeds 2-5 build their caches inside the subprocess while
+    # seed 1 is already training, making the run appear single-process.
+    # Pre-warming here (sequential, in the parent) ensures every subprocess finds
+    # its cache ready and starts training immediately.
+    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
+        seeds_needing_cache = [
+            s for s in args.seed_list
+            if s != 1  # seed 1 already warmed by get_dataset_train_size above
+        ]
+        if seeds_needing_cache:
+            print(f"[INFO] Pre-warming DMPEGNN dataset caches for seeds {seeds_needing_cache} ...")
+            for seed in seeds_needing_cache:
+                load_dmpegnn_dataset(data_name=args.data_name, data_path=args.data_path, seed=seed)
+            print("[INFO] All seed caches ready.")
+
+    # Dynamic patience: small datasets converge quickly; larger ones need more epochs.
+    # DMPEGNN models converge faster than MPN/GCN due to 3D attention, so they get
+    # a tighter patience cap even on large datasets to avoid plateau over-waiting.
+    is_dmpegnn = args.model_type in ("DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC")
+    if n_train < 700:
+        dynamic_patience = 50
+    elif n_train < 2000:
+        dynamic_patience = 50
+    else:
+        dynamic_patience = 60 if is_dmpegnn else 100
+    if dynamic_patience != args.patience:
+        print(f"[INFO] Overriding patience {args.patience} → {dynamic_patience} (n_train={n_train}, model={args.model_type})")
+        args.patience = dynamic_patience
+
+    # loss_patience_limit: how many consecutive epochs of val_loss deterioration trigger early stop.
+    # Rules:
+    #   - val_loss_threshold > 0: user explicitly enabled → use as-is, limit=25
+    #   - val_loss_threshold == 0 AND metric==MAE (regression) AND n_train>=2000:
+    #       auto-enable with threshold=0.15; val_loss is tightly coupled to MAE so
+    #       a rising loss reliably signals plateau even on large datasets.
+    #   - otherwise (Spearman/AUC tasks, or small datasets already covered by metric_patience):
+    #       keep disabled; loss and rank/classification metric can decouple.
+    if args.val_loss_threshold > 0.0:
+        args.loss_patience_limit = 25
+    elif args.metric == "MAE" and n_train >= 2000:
+        args.val_loss_threshold = 0.15
+        args.loss_patience_limit = 25
+    else:
+        args.loss_patience_limit = 0
+    if args.loss_patience_limit > 0:
+        print(f"[INFO] val_loss monitoring enabled: threshold={args.val_loss_threshold:.2f}, loss_patience={args.loss_patience_limit}")
+
     study_start_time = time.time()
     study = optuna.create_study(
         direction=direction,
         sampler=optuna.samplers.TPESampler(),
         # pruner=optuna.pruners.NopPruner(),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=40),
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=50, n_startup_trials=10),
         study_name = f"opt_{args.model_type.lower()}_{args.data_name}",
         storage=f"sqlite:///{SAVE_DIR}/optuna_study.db",
         load_if_exists=True, # load existing study
@@ -432,7 +410,7 @@ if __name__ == '__main__':
     n_existing = len(study.trials)
     n_rest = max(0, args.num_trials - n_existing)
     if n_rest > 0:
-        study.optimize(lambda trial: objective(trial, args), n_trials=n_rest)
+        study.optimize(lambda trial: objective(trial, args, n_train=n_train), n_trials=n_rest)
     elif n_existing > 0:
         print(f"[INFO] Study already has {n_existing} trials (>= num_trials={args.num_trials}), skip optimize.")
     study_end_time = time.time()

@@ -616,23 +616,23 @@ class DMPEGNN_Fusion_Model(nn.Module):
             use_coord_branch=False,
             **kwargs
         )
-        # When task_output_dims is provided, enable multi-task heads (similar to other fusion models).
-        self.task_output_dims = task_output_dims
-        if task_output_dims is not None:
-            assert hasattr(self.backbone, "graph_repr_dim"), \
-                "DMPEGNN_Fusion_Model backbone 必須定義 graph_repr_dim 屬性以支援 multi-task 模式。"
-            dmpegnn_graph_dim = int(self.backbone.graph_repr_dim)
-            self.shared_mlp = SharedMLP(
-                input_dim=dmpegnn_graph_dim,
-                hidden_dim=mlp_hidden_dim,
-                num_layers=mlp_num_layers,
-                activation=mlp_activation,
-                dropout=mlp_dropout,
-                norm_type=mlp_norm_type,
-            )
-            self.task_heads = nn.ModuleList([
-                nn.Linear(self.shared_mlp.output_dim, out_dim) for out_dim in task_output_dims
-            ])
+        # SharedMLP + task_heads are always created (no descriptor in this model).
+        assert hasattr(self.backbone, "graph_repr_dim"), \
+            "DMPEGNN_Fusion_Model backbone 必須定義 graph_repr_dim 屬性。"
+        dmpegnn_graph_dim = int(self.backbone.graph_repr_dim)
+        task_dims = task_output_dims if task_output_dims is not None else [output_dim]
+        self.task_output_dims = task_dims
+        self.shared_mlp = SharedMLP(
+            input_dim=dmpegnn_graph_dim,
+            hidden_dim=mlp_hidden_dim,
+            num_layers=mlp_num_layers,
+            activation=mlp_activation,
+            dropout=mlp_dropout,
+            norm_type=mlp_norm_type,
+        )
+        self.task_heads = nn.ModuleList([
+            nn.Linear(self.shared_mlp.output_dim, out_dim) for out_dim in task_dims
+        ])
 
     def forward(
         self,
@@ -640,8 +640,8 @@ class DMPEGNN_Fusion_Model(nn.Module):
         edge_index: torch.Tensor,
         edge_attr: torch.Tensor,
         batch: torch.Tensor,
-        descriptor: torch.Tensor,
-        pos: torch.Tensor,
+        descriptor: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
         task_index: int = 0,
         molecule_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -653,19 +653,8 @@ class DMPEGNN_Fusion_Model(nn.Module):
                     "必須提供形狀為 [N, 3] 的 3D 座標張量 `pos`。"
                 )
 
-        # Single-task path (backward compatible): ignore task_index, return backbone logits directly.
-        if self.task_output_dims is None:
-            logits, _ = self.backbone(
-                x, edge_index, edge_attr, batch=batch,
-                pos=pos, fingerprint=None, descriptor=None, b2revb=None
-            )
-            # Multi-conformer aggregation: average conformer logits per molecule.
-            if molecule_idx is not None and molecule_idx.numel() == logits.size(0):
-                logits = global_mean_pool(logits, molecule_idx)
-            return logits
-
-        # Multi-task path (Route B): use DMPEGNN graph_features + SharedMLP + task-specific head.
-        # Defensive unpacking: backbone return shape may change (2-tuple vs 3-tuple); we only rely on graph_features.
+        # All paths: extract graph_features from backbone (no descriptor inside backbone).
+        # descriptor argument is intentionally unused — descriptors are not part of this model.
         result = self.backbone(
             x, edge_index, edge_attr, batch=batch,
             pos=pos, fingerprint=None, descriptor=None,
@@ -676,6 +665,71 @@ class DMPEGNN_Fusion_Model(nn.Module):
         if molecule_idx is not None and molecule_idx.numel() == graph_features.size(0):
             graph_features = global_mean_pool(graph_features, molecule_idx)
         shared_features = self.shared_mlp(graph_features.float())
+        return self.task_heads[task_index](shared_features)
+
+
+class DMPEGNN_Desc_Model(nn.Module):
+    """DMPEGNN graph encoder + RDKit Descriptor (200-dim), fused by MLP. No MMB."""
+
+    def __init__(
+        self,
+        dmpegnn_backbone: nn.Module,
+        task_output_dims: List[int],
+        mlp_hidden_dim: int = 128,
+        mlp_num_layers: int = 3,
+        mlp_activation: str = "relu",
+        mlp_dropout: float = 0.2,
+        mlp_norm_type: str = "none",
+    ):
+        super().__init__()
+        self.dmpegnn_backbone = dmpegnn_backbone
+
+        graph_dim = int(dmpegnn_backbone.graph_repr_dim)
+        combined_dim = graph_dim + int(DESC_DIM)
+        self.shared_mlp = SharedMLP(
+            input_dim=combined_dim,
+            hidden_dim=mlp_hidden_dim,
+            num_layers=mlp_num_layers,
+            activation=mlp_activation,
+            dropout=mlp_dropout,
+            norm_type=mlp_norm_type,
+        )
+        self.task_heads = nn.ModuleList([
+            nn.Linear(self.shared_mlp.output_dim, out_dim) for out_dim in task_output_dims
+        ])
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: torch.Tensor,
+        descriptors: torch.Tensor,
+        batch: torch.Tensor,
+        task_index: int,
+        pos: Optional[torch.Tensor] = None,
+        molecule_idx: Optional[torch.Tensor] = None,
+        conformer_aggregation: str = "mean",
+    ) -> torch.Tensor:
+        if getattr(self.dmpegnn_backbone, "use_equivariant", False):
+            if pos is None or pos.dim() != 2 or pos.size(-1) != 3:
+                raise ValueError(
+                    "DMPEGNN_Desc_Model: backbone.use_equivariant=True 時，"
+                    "必須提供形狀為 [N, 3] 的 3D 座標張量 `pos`。"
+                )
+        _, _, graph_features = self.dmpegnn_backbone(
+            x, edge_index, edge_attr, batch=batch,
+            pos=pos, fingerprint=None, descriptor=None,
+            return_graph_features=True, b2revb=None, compute_logits=False,
+        )
+        if molecule_idx is not None and molecule_idx.numel() == graph_features.size(0):
+            if conformer_aggregation == "max":
+                graph_features = global_max_pool(graph_features, molecule_idx)
+            else:
+                graph_features = global_mean_pool(graph_features, molecule_idx)
+
+        desc = descriptors.contiguous().view(-1, DESC_DIM).float()
+        combined = torch.cat([graph_features.float(), desc], dim=1)
+        shared_features = self.shared_mlp(combined)
         return self.task_heads[task_index](shared_features)
 
 
@@ -728,6 +782,13 @@ class DMPEGNN_MMB_Desc_Model(nn.Module):
         conformer_aggregation: str = "mean",
     ) -> torch.Tensor:
         # DMPEGNN backbone returns (logits, attention_weights, graph_features) when requested.
+        if getattr(self.dmpegnn_backbone, "use_equivariant", False):
+            if pos is None or pos.dim() != 2 or pos.size(-1) != 3:
+                raise ValueError(
+                    "DMPEGNN_MMB_Desc_Model: backbone.use_equivariant=True 時，"
+                    "必須提供形狀為 [N, 3] 的 3D 座標張量 `pos`。"
+                )
+
         # Safety: if backbone is configured to consume descriptors internally, require non-None descriptor input.
         if getattr(self.dmpegnn_backbone, "use_descriptor", False) and descriptors is None:
             raise ValueError(
