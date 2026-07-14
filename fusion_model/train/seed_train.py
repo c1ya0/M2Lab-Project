@@ -30,6 +30,10 @@ from nemo_chem.models.megamolbart import MegaMolBARTModel
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# 需要 3D 圖資料管線（load_dmpegnn_dataset + collate_dmpegnn_multi）的模型類型。
+# 與 optuna_train.py 中的 _3D_MODEL_TYPES 保持一致。
+_3D_MODEL_TYPES = frozenset(["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC", "AEGNN", "AEGNN_DESC"])
+
 
 def _apply_log1p_to_dataset(dataset, model_type: str) -> None:
     """In-place log1p transform of regression targets.
@@ -41,7 +45,7 @@ def _apply_log1p_to_dataset(dataset, model_type: str) -> None:
     tensor (used by collate_dmpegnn_multi → batch.y) AND the .labels list
     (used by pos_weight computation, though irrelevant for regression).
     """
-    if model_type in ("DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"):
+    if model_type in _3D_MODEL_TYPES:
         dataset.labels = [float(np.log1p(l)) for l in dataset.labels]
         for g in dataset.graphs:
             g.y = torch.log1p(g.y)
@@ -77,7 +81,7 @@ def get_args():
 def build_model_and_loaders(args: SimpleNamespace):
     """Build model and dataloaders for a single seed, mirroring optuna_train.objective."""
     # === dataset ===
-    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
+    if args.model_type in _3D_MODEL_TYPES:
         train_dataset, valid_dataset, _ = load_dmpegnn_dataset(
             data_name=args.data_name,
             data_path=args.data_path,
@@ -91,7 +95,7 @@ def build_model_and_loaders(args: SimpleNamespace):
         )
 
     drop_last = True if args.mlp_norm_type == "BatchNorm" else False
-    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
+    if args.model_type in _3D_MODEL_TYPES:
         # Use standard PyTorch DataLoader + custom collate so multi-conformer batches are built correctly.
         DataLoaderCls = TorchDataLoader
         collate_fn = collate_dmpegnn_multi

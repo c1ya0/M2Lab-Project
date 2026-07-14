@@ -48,31 +48,33 @@ def valid(model, loader, loss_fn, MODEL_TYPE, metric, TASK_TYPE, DEVICE, log_tra
     """
     model.eval()
     total_loss = 0
+    num_batches = 0
     all_preds = []
     all_labels = []
-    
+
     with torch.no_grad(): # disable gradient calculation
         for batch in loader:
             if batch.batch.size(0) < 2:
                 continue  # skip too-small batch
-            batch = batch.to(DEVICE)      
+            batch = batch.to(DEVICE)
             # forward pass
-            output = model_forward(model, batch, MODEL_TYPE)  
+            output = model_forward(model, batch, MODEL_TYPE)
             # calculating loss (always in log space when log_transform=True)
             loss = loss_fn(output.view(-1), batch.y)
-            
+
             # total loss
             total_loss += loss.item()
-            
+            num_batches += 1
+
             # === metric ===
             if TASK_TYPE == 'classification':
                 output = torch.sigmoid(output) # convert to a probability value between 0 and 1
 
             all_preds.append(output.detach().cpu().numpy())
             all_labels.append(batch.y.detach().cpu().numpy())
-                
-    # average loss  
-    avg_loss = total_loss / len(loader)
+
+    # average loss
+    avg_loss = total_loss / max(num_batches, 1)
         
     # average metric
     all_preds = np.concatenate(all_preds)
@@ -179,6 +181,27 @@ def model_forward(model, data, model_type):
         pos = getattr(data, 'pos', None)
         molecule_idx = getattr(data, 'molecule_idx', None)
         return model(data.smiles, data.x, data.edge_index, edge_attr, data.descriptor, data.batch, task_index=0, pos=pos, molecule_idx=molecule_idx)
+    # ------------------------------------------------------------------
+    # AEGNN-M routing — shares the DMPEGNN 3D data pipeline (same batch
+    # fields: x[82-dim], edge_attr[9-dim], pos, molecule_idx).
+    # Backbone: core.aegnnm_model.AEGNNM  ≠  DMPEGNN (edmpnn_model_new)
+    # ------------------------------------------------------------------
+    elif model_type == 'AEGNN':
+        edge_attr = getattr(data, 'edge_attr', None)
+        if edge_attr is None:
+            n_edges = data.edge_index.size(1)
+            edge_attr = torch.zeros(n_edges, 9, device=data.x.device, dtype=data.x.dtype)
+        pos = getattr(data, 'pos', None)
+        molecule_idx = getattr(data, 'molecule_idx', None)
+        return model(data.x, data.edge_index, edge_attr, data.batch, pos=pos, task_index=0, molecule_idx=molecule_idx)
+    elif model_type == 'AEGNN_DESC':
+        edge_attr = getattr(data, 'edge_attr', None)
+        if edge_attr is None:
+            n_edges = data.edge_index.size(1)
+            edge_attr = torch.zeros(n_edges, 9, device=data.x.device, dtype=data.x.dtype)
+        pos = getattr(data, 'pos', None)
+        molecule_idx = getattr(data, 'molecule_idx', None)
+        return model(data.x, data.edge_index, edge_attr, data.descriptor, data.batch, task_index=0, pos=pos, molecule_idx=molecule_idx)
     elif model_type == 'GCN':
         return model(data.x, data.edge_index, data.batch)
     elif model_type == 'MMB':

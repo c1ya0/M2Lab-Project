@@ -12,10 +12,12 @@ os.environ["NEMO_LOG_LEVEL"] = "ERROR" # Suppress NeMo logs
 # model_types = ['MPN_MMB']
 # model_types = ['GCN_MMB_DESC']
 # model_types = ['MPN_MMB_DESC']
-model_types = ['DMPEGNN_DESC']
+# model_types = ['DMPEGNN_DESC']
 # model_types = ['DMPEGNN_MMB_DESC']
 # model_types = ['DMPEGNN']
 # model_types = ['MMB_DESC']
+model_types = ['AEGNN']        
+# model_types = ['AEGNN_DESC']   
 
 # ------ dataset ------
 # log_transform: True  → Y 是正值且右偏（raw units），測試前套 log1p，test() 以 expm1 還原
@@ -27,7 +29,7 @@ dataset_settings = {
     # 'hia_hou':                    {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
     # 'pgp_broccatelli':            {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
     # 'bioavailability_ma':         {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
-    # 'lipophilicity_astrazeneca':  {'task_type': 'regression',    'loss': 'MAE', 'metric': 'MAE',      'log_transform': False},  # logD，已 log scale
+    'lipophilicity_astrazeneca':  {'task_type': 'regression',    'loss': 'MAE', 'metric': 'MAE',      'log_transform': False},  # logD，已 log scale
     # 'solubility_aqsoldb':         {'task_type': 'regression',    'loss': 'MAE', 'metric': 'MAE',      'log_transform': False},  # log 溶解度，已 log scale
 
     # === D ===
@@ -37,7 +39,7 @@ dataset_settings = {
 
     # === M ===
     # 'cyp2d6_veith':               {'task_type': 'classification', 'loss': 'BCE', 'metric': 'PR-AUC',   'log_transform': False},
-    'cyp3a4_veith':               {'task_type': 'classification', 'loss': 'BCE', 'metric': 'PR-AUC',   'log_transform': False},
+    # 'cyp3a4_veith':               {'task_type': 'classification', 'loss': 'BCE', 'metric': 'PR-AUC',   'log_transform': False},
     # 'cyp2c9_veith':               {'task_type': 'classification', 'loss': 'BCE', 'metric': 'PR-AUC',   'log_transform': False},
     # 'cyp2d6_substrate_carbonmangels': {'task_type': 'classification', 'loss': 'BCE', 'metric': 'PR-AUC',  'log_transform': False},
     # 'cyp3a4_substrate_carbonmangels': {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC', 'log_transform': False},
@@ -49,7 +51,7 @@ dataset_settings = {
     # 'clearance_hepatocyte_az':    {'task_type': 'regression',    'loss': 'MAE', 'metric': 'Spearman', 'log_transform': True},   # 肝清除率，右偏
 
     # === T ===
-    #'herg':                       {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
+    # 'herg':                       {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
     # 'dili':                       {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
     # 'ames':                       {'task_type': 'classification', 'loss': 'BCE', 'metric': 'ROC-AUC',  'log_transform': False},
     # 'ld50_zhu':                   {'task_type': 'regression',    'loss': 'MAE', 'metric': 'MAE',      'log_transform': True},   # LD50，正值右偏

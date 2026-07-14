@@ -3,6 +3,9 @@ os.environ["NEMO_LOG_LEVEL"] = "ERROR" # Suppress NeMo logs
 
 # ------ model ------
 model_types = ['MPN_MMB_DESC']
+# ---- AEGNN-M (單一 phi_e，pos_embedding；與 DMPEGNN 為不同模型) ----
+# model_types = ['AEGNN']        # AEGNN-M graph encoder only
+# model_types = ['AEGNN_DESC']   # AEGNN-M + RDKit 200-dim descriptor
 
 # ------ dataset ------
 dataset_settings = {

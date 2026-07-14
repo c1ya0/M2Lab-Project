@@ -8,6 +8,7 @@ from torch.cuda.amp import autocast
 from typing import List, Optional
 
 from core.edmpnn_model_new import AEGNNM as DMPEGNN  # 類別在 edmpnn_model_new.py 內原名為 AEGNNM
+from core.aegnnm_model import AEGNNM as AEGNN        # AEGNN-M 原版（無 dmp_steps / geo_gate）
 
 # =================== Configuration Constants ===================
 DESC_DIM = 200
@@ -822,5 +823,158 @@ class DMPEGNN_MMB_Desc_Model(nn.Module):
         # Route A: descriptors fused at MLP level alongside graph features and MMB embeddings.
         desc = descriptors.contiguous().view(-1, DESC_DIM).float()
         combined = torch.cat([graph_features.float(), mmb_embeddings.float(), desc], dim=1)
+        shared_features = self.shared_mlp(combined)
+        return self.task_heads[task_index](shared_features)
+
+
+# ===========================================================================
+# AEGNN-M Wrapper Models
+# These wrap core/aegnnm_model.AEGNNM (AEGNN-M original architecture).
+# NOTE: Do NOT confuse with DMPEGNN_* wrappers above, which use
+#       core/edmpnn_model_new.AEGNNM (DMPEGNN — has dmp_steps + geo_gate).
+# ===========================================================================
+
+class AEGNN_Fusion_Model(nn.Module):
+    """AEGNN-M graph encoder only (no descriptor). Same interface as DMPEGNN_Fusion_Model."""
+
+    def __init__(
+        self,
+        node_features: int = 82,
+        edge_features: int = 9,
+        output_dim: int = 1,
+        hidden_dim: int = 256,
+        num_layers: int = 6,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+        pool_type: str = "mean",
+        task_output_dims: Optional[List[int]] = None,
+        mlp_hidden_dim: int = 128,
+        mlp_num_layers: int = 3,
+        mlp_activation: str = "relu",
+        mlp_dropout: float = 0.2,
+        mlp_norm_type: str = "none",
+        **kwargs
+    ):
+        super().__init__()
+        self.backbone = AEGNN(
+            node_features=node_features,
+            edge_features=edge_features,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            dropout=dropout,
+            output_dim=output_dim,
+            pool_type=pool_type,
+            use_equivariant=True,
+            use_fingerprint=False,
+            use_descriptor=False,
+        )
+        assert hasattr(self.backbone, "graph_repr_dim"), \
+            "AEGNN_Fusion_Model backbone 必須定義 graph_repr_dim 屬性。"
+        aegnn_graph_dim = int(self.backbone.graph_repr_dim)
+        task_dims = task_output_dims if task_output_dims is not None else [output_dim]
+        self.task_output_dims = task_dims
+        self.shared_mlp = SharedMLP(
+            input_dim=aegnn_graph_dim,
+            hidden_dim=mlp_hidden_dim,
+            num_layers=mlp_num_layers,
+            activation=mlp_activation,
+            dropout=mlp_dropout,
+            norm_type=mlp_norm_type,
+        )
+        self.task_heads = nn.ModuleList([
+            nn.Linear(self.shared_mlp.output_dim, out_dim) for out_dim in task_dims
+        ])
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: torch.Tensor,
+        batch: torch.Tensor,
+        descriptor: Optional[torch.Tensor] = None,
+        pos: Optional[torch.Tensor] = None,
+        task_index: int = 0,
+        molecule_idx: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if getattr(self.backbone, "use_equivariant", False):
+            if pos is None or pos.dim() != 2 or pos.size(-1) != 3:
+                raise ValueError(
+                    "AEGNN_Fusion_Model: backbone.use_equivariant=True 時，"
+                    "必須提供形狀為 [N, 3] 的 3D 座標張量 `pos`。"
+                )
+        result = self.backbone(
+            x, edge_index, edge_attr, batch=batch,
+            pos=pos, fingerprint=None, descriptor=None,
+            return_graph_features=True, b2revb=None, compute_logits=False,
+        )
+        graph_features = result[-1]
+        if molecule_idx is not None and molecule_idx.numel() == graph_features.size(0):
+            graph_features = global_mean_pool(graph_features, molecule_idx)
+        shared_features = self.shared_mlp(graph_features.float())
+        return self.task_heads[task_index](shared_features)
+
+
+class AEGNN_Desc_Model(nn.Module):
+    """AEGNN-M graph encoder + RDKit Descriptor (200-dim), fused by MLP. Same interface as DMPEGNN_Desc_Model."""
+
+    def __init__(
+        self,
+        aegnn_backbone: nn.Module,
+        task_output_dims: List[int],
+        mlp_hidden_dim: int = 128,
+        mlp_num_layers: int = 3,
+        mlp_activation: str = "relu",
+        mlp_dropout: float = 0.2,
+        mlp_norm_type: str = "none",
+    ):
+        super().__init__()
+        self.aegnn_backbone = aegnn_backbone
+
+        graph_dim = int(aegnn_backbone.graph_repr_dim)
+        combined_dim = graph_dim + int(DESC_DIM)
+        self.shared_mlp = SharedMLP(
+            input_dim=combined_dim,
+            hidden_dim=mlp_hidden_dim,
+            num_layers=mlp_num_layers,
+            activation=mlp_activation,
+            dropout=mlp_dropout,
+            norm_type=mlp_norm_type,
+        )
+        self.task_heads = nn.ModuleList([
+            nn.Linear(self.shared_mlp.output_dim, out_dim) for out_dim in task_output_dims
+        ])
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_attr: torch.Tensor,
+        descriptors: torch.Tensor,
+        batch: torch.Tensor,
+        task_index: int,
+        pos: Optional[torch.Tensor] = None,
+        molecule_idx: Optional[torch.Tensor] = None,
+        conformer_aggregation: str = "mean",
+    ) -> torch.Tensor:
+        if getattr(self.aegnn_backbone, "use_equivariant", False):
+            if pos is None or pos.dim() != 2 or pos.size(-1) != 3:
+                raise ValueError(
+                    "AEGNN_Desc_Model: backbone.use_equivariant=True 時，"
+                    "必須提供形狀為 [N, 3] 的 3D 座標張量 `pos`。"
+                )
+        _, _, graph_features = self.aegnn_backbone(
+            x, edge_index, edge_attr, batch=batch,
+            pos=pos, fingerprint=None, descriptor=None,
+            return_graph_features=True, b2revb=None, compute_logits=False,
+        )
+        if molecule_idx is not None and molecule_idx.numel() == graph_features.size(0):
+            if conformer_aggregation == "max":
+                graph_features = global_max_pool(graph_features, molecule_idx)
+            else:
+                graph_features = global_mean_pool(graph_features, molecule_idx)
+
+        desc = descriptors.contiguous().view(-1, DESC_DIM).float()
+        combined = torch.cat([graph_features.float(), desc], dim=1)
         shared_features = self.shared_mlp(combined)
         return self.task_heads[task_index](shared_features)

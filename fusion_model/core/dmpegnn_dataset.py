@@ -32,6 +32,14 @@ class DMPEGNNGraphDataset(Dataset):
         if molecule_indices is None:
             molecule_indices = list(range(len(graphs)))
         self.molecule_indices = molecule_indices
+
+        if not molecule_indices:
+            raise ValueError(
+                "DMPEGNNGraphDataset received an empty molecule_indices/graphs list — "
+                "no molecules survived featurization for this split (SMILES parsing, "
+                "3D conformer generation, or descriptor computation may all be the cause). "
+                "Check the upstream smiles_list and the filters in _build_dmpegnn_graphs()."
+            )
         num_molecules = max(molecule_indices) + 1
         self._mol_to_graph_indices: List[List[int]] = [[] for _ in range(num_molecules)]
         for j, mid in enumerate(molecule_indices):
@@ -146,8 +154,9 @@ def _build_dmpegnn_graphs(
     graphs: List[Data] = []
     labels_out: List[float] = []
     molecule_indices: List[int] = []
+    survived_idx = 0  # dense 0-based counter, incremented only when a molecule survives all filters
 
-    for mol_idx, (smiles, label) in enumerate(zip(smiles_list, labels_list)):
+    for smiles, label in zip(smiles_list, labels_list):
         if len(smiles) > 512:
             continue
 
@@ -171,7 +180,7 @@ def _build_dmpegnn_graphs(
                     smiles=smiles,
                 )
                 graphs.append(data)
-                molecule_indices.append(mol_idx)
+                molecule_indices.append(survived_idx)
         else:
             data = Data(
                 x=graph_or_list.x,
@@ -183,8 +192,9 @@ def _build_dmpegnn_graphs(
                 smiles=smiles,
             )
             graphs.append(data)
-            molecule_indices.append(mol_idx)
+            molecule_indices.append(survived_idx)
         labels_out.append(label)
+        survived_idx += 1
 
     if num_conformers_to_keep > 1:
         torch.save({"graphs": graphs, "labels": labels_out, "molecule_indices": molecule_indices}, cache_meta)

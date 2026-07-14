@@ -13,6 +13,8 @@ from core.models import (
     MegaMolBART_Finetuned_Model, MPN_MMB_Desc_Model,
     MPN_Model, MPN_Desc_Model, MPN_MMB_Model,
     DMPEGNN, DMPEGNN_Fusion_Model, DMPEGNN_Desc_Model, DMPEGNN_MMB_Desc_Model,
+    # AEGNN-M wrappers — backbone is core.aegnnm_model.AEGNNM (distinct from DMPEGNN)
+    AEGNN, AEGNN_Fusion_Model, AEGNN_Desc_Model,
 )
 from chemprop.models import MPN
 from chemprop.args import TrainArgs
@@ -174,6 +176,45 @@ def get_model(args, model_type, task_output_dims,
         return DMPEGNN_MMB_Desc_Model(
             dmpegnn_backbone=dmpegnn_backbone,
             mmb_model=megamolbart_model,
+            task_output_dims=task_output_dims,
+            **mlp_kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # AEGNN-M models
+    # Backbone: core.aegnnm_model.AEGNNM  (single phi_e, pos_embedding)
+    # Distinct from DMPEGNN (no dmp_steps, no geo_gate, graph_repr_dim=hidden_dim)
+    # ------------------------------------------------------------------
+    if model_type == 'AEGNN':
+        return AEGNN_Fusion_Model(
+            node_features=82,
+            edge_features=9,
+            output_dim=task_output_dims[0],
+            hidden_dim=args.aegnn_hidden_dim,
+            num_layers=args.aegnn_num_layers,
+            num_heads=args.aegnn_num_heads,
+            dropout=args.aegnn_dropout,
+            pool_type=args.aegnn_pool_type,
+            task_output_dims=task_output_dims,
+            **mlp_kwargs,
+        )
+
+    if model_type == 'AEGNN_DESC':
+        aegnn_backbone = AEGNN(
+            node_features=82,
+            edge_features=9,
+            hidden_dim=args.aegnn_hidden_dim,
+            num_layers=args.aegnn_num_layers,
+            num_heads=args.aegnn_num_heads,
+            dropout=args.aegnn_dropout,
+            output_dim=task_output_dims[0],
+            pool_type=args.aegnn_pool_type,
+            use_equivariant=True,
+            use_fingerprint=False,
+            use_descriptor=False,
+        ).to(DEVICE)
+        return AEGNN_Desc_Model(
+            aegnn_backbone=aegnn_backbone,
             task_output_dims=task_output_dims,
             **mlp_kwargs,
         )

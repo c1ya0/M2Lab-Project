@@ -72,10 +72,28 @@ def main():
         if not hasattr(args, 'dmpegnn_pool_type'):
             args.dmpegnn_pool_type = 'mean'
 
+    # AEGNN defaults when best_params did not set them
+    if 'AEGNN' in args.model_type:
+        if not hasattr(args, 'aegnn_hidden_dim'):
+            args.aegnn_hidden_dim = 256
+        if not hasattr(args, 'aegnn_num_layers'):
+            args.aegnn_num_layers = 6
+        if not hasattr(args, 'aegnn_num_heads'):
+            args.aegnn_num_heads = 8
+        if not hasattr(args, 'aegnn_dropout'):
+            args.aegnn_dropout = 0.1
+        if not hasattr(args, 'aegnn_pool_type'):
+            args.aegnn_pool_type = 'mean'
+
+    # batch_size fallback（當 best_trial_info.json 不存在時）
+    if not hasattr(args, 'batch_size'):
+        args.batch_size = 32
+
     # === paths ===
     FINAL_DIR = os.path.join(SAVE_DIR, "best_trial_models_50")
 
-    dmpegnn_model_types = {'DMPEGNN', 'DMPEGNN_DESC', 'DMPEGNN_MMB_DESC'}
+    # 需要 3D 圖資料管線的模型類型（與 seed_train.py、optuna_train.py 保持一致）
+    dmpegnn_model_types = {'DMPEGNN', 'DMPEGNN_DESC', 'DMPEGNN_MMB_DESC', 'AEGNN', 'AEGNN_DESC'}
 
     all_test_scores = []
     for SEED in args.seed_list:

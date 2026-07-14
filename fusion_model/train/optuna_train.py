@@ -33,9 +33,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+_3D_MODEL_TYPES = frozenset([
+    "DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC",
+    "AEGNN",   "AEGNN_DESC",          # AEGNN-M — same 3D data pipeline as DMPEGNN
+])
+
 def get_dataset_train_size(args) -> int:
     """Load training set once (seed=1) to determine n_train for capacity scaling."""
-    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
+    if args.model_type in _3D_MODEL_TYPES:
         train_ds, _, _ = load_dmpegnn_dataset(
             data_name=args.data_name,
             data_path=args.data_path,
@@ -54,7 +59,7 @@ KALEIDO_AVAILABLE = True
 # -------------------- Argument Parsing --------------------
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_type', type=str, required=True, choices=['GCN', 'MMB', 'DESC', 'GCN_MMB', 'MMB_DESC', 'GCN_DESC', 'GCN_MMB_DESC', 'MPN_MMB_DESC', 'MPN', 'MPN_DESC', 'MPN_MMB', 'DMPEGNN', 'DMPEGNN_DESC', 'DMPEGNN_MMB_DESC'])
+    parser.add_argument('--model_type', type=str, required=True, choices=['GCN', 'MMB', 'DESC', 'GCN_MMB', 'MMB_DESC', 'GCN_DESC', 'GCN_MMB_DESC', 'MPN_MMB_DESC', 'MPN', 'MPN_DESC', 'MPN_MMB', 'DMPEGNN', 'DMPEGNN_DESC', 'DMPEGNN_MMB_DESC', 'AEGNN', 'AEGNN_DESC'])
     parser.add_argument('--data_name', type=str, required=True)
     parser.add_argument('--task_type', type=str, required=True, choices=['regression', 'classification'])
     parser.add_argument('--loss_function', type=str, required=True, choices=['MAE', 'BCE'])
@@ -137,6 +142,32 @@ def sample_dmpegnn_params(trial, n_train: int = None):
         'dmpegnn_pool_type': trial.suggest_categorical('dmpegnn_pool_type', ['mean', 'sum']),
     }
 
+def sample_aegnn_params(trial, n_train: int = None):
+    """Hyperparameter search space for AEGNN-M backbone.
+
+    Mirrors sample_dmpegnn_params() but WITHOUT dmpegnn_dmp_steps,
+    because AEGNN-M uses a single phi_e MLP (no directed message passing).
+    Uses 'aegnn_' prefix to keep these params distinct from DMPEGNN's.
+    """
+    # Same capacity tiers as DMPEGNN
+    if n_train is not None and n_train < 700:
+        hidden_choices = [64, 128]
+        max_layers = 3
+    elif n_train is not None and n_train < 2000:
+        hidden_choices = [128, 256, 384]
+        max_layers = 4
+    else:
+        hidden_choices = [128, 256, 384]
+        max_layers = 6
+    return {
+        'aegnn_hidden_dim':  trial.suggest_categorical('aegnn_hidden_dim',  hidden_choices),
+        'aegnn_num_layers':  trial.suggest_int('aegnn_num_layers',  2, max_layers),
+        'aegnn_num_heads':   trial.suggest_categorical('aegnn_num_heads',   [4, 8]),
+        'aegnn_dropout':     trial.suggest_float('aegnn_dropout',     0.3, 0.5, step=0.05),
+        'aegnn_pool_type':   trial.suggest_categorical('aegnn_pool_type',   ['mean', 'sum']),
+        # NOTE: no aegnn_dmp_steps — AEGNN-M has no directed message passing
+    }
+
 def sample_optimizer_params(trial):
     return {
         'lr': trial.suggest_float('lr', 1e-5, 1e-3, log=True),
@@ -156,6 +187,9 @@ def sample_hyperparameters(trial, args, n_train: int = None):
         sampled.update(sample_mpn_params(trial))
     if 'DMPEGNN' in args.model_type:
         sampled.update(sample_dmpegnn_params(trial, n_train=n_train))
+    # AEGNN-M: sample aegnn_* params (no dmp_steps; distinct from DMPEGNN)
+    if 'AEGNN' in args.model_type:
+        sampled.update(sample_aegnn_params(trial, n_train=n_train))
     return sampled
 
 # -------------------- Objective Function for Optuna --------------------
@@ -353,13 +387,13 @@ if __name__ == '__main__':
     # seed 1 is already training, making the run appear single-process.
     # Pre-warming here (sequential, in the parent) ensures every subprocess finds
     # its cache ready and starts training immediately.
-    if args.model_type in ["DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC"]:
+    if args.model_type in _3D_MODEL_TYPES:
         seeds_needing_cache = [
             s for s in args.seed_list
             if s != 1  # seed 1 already warmed by get_dataset_train_size above
         ]
         if seeds_needing_cache:
-            print(f"[INFO] Pre-warming DMPEGNN dataset caches for seeds {seeds_needing_cache} ...")
+            print(f"[INFO] Pre-warming 3D dataset caches ({args.model_type}) for seeds {seeds_needing_cache} ...")
             for seed in seeds_needing_cache:
                 load_dmpegnn_dataset(data_name=args.data_name, data_path=args.data_path, seed=seed)
             print("[INFO] All seed caches ready.")
@@ -367,13 +401,15 @@ if __name__ == '__main__':
     # Dynamic patience: small datasets converge quickly; larger ones need more epochs.
     # DMPEGNN models converge faster than MPN/GCN due to 3D attention, so they get
     # a tighter patience cap even on large datasets to avoid plateau over-waiting.
-    is_dmpegnn = args.model_type in ("DMPEGNN", "DMPEGNN_DESC", "DMPEGNN_MMB_DESC")
+    # Both DMPEGNN and AEGNN-M use 3D equivariant attention; apply the same
+    # tighter patience cap on large datasets (they converge faster than GCN/MPN).
+    is_3d_model = args.model_type in _3D_MODEL_TYPES
     if n_train < 700:
         dynamic_patience = 50
     elif n_train < 2000:
         dynamic_patience = 50
     else:
-        dynamic_patience = 60 if is_dmpegnn else 100
+        dynamic_patience = 60 if is_3d_model else 100
     if dynamic_patience != args.patience:
         print(f"[INFO] Overriding patience {args.patience} → {dynamic_patience} (n_train={n_train}, model={args.model_type})")
         args.patience = dynamic_patience
